@@ -1,123 +1,83 @@
-# CaveClaw Agent Core
+# CaveClaw AgentCore
 
-`caveclaw.agent_core` 是一个轻量级、完全受控且高度容纳自定义 UI 的大型语言模型 (LLM) 推理闭环引擎。它是基于 `asyncio` 的 TypeScript `pi-agent-core` 的原生 Python 复刻版。
+AgentCore 是一个纯粹、底层、解耦的大语言模型 (LLM) 代理心跳引擎。
+它融合了双重循环设计原则与响应式事件流机制，为上层应用提供高度可观测、安全的工具执行环境。
 
-## 🎯 核心设计哲学
-
-原生的 LLM 接口（如 OpenAI, Anthropic）过于死板，只允许 `role: user/assistant/system`。如果你想在会话历史中持久化地保留“系统通知”、“正在加载的占位符卡片”甚至“报错黄条”，强塞给 LLM 会导致 Token 浪费和幻觉报错。
-
-`agent_core` 解决了这个问题：
-1. **统一时间线 (`AgentMessage`)**：在应用层，你可以往 `agent.state.messages` 里随意放入标准的 LLM 消息，或者你自定义的任意 UI 消息（如 `NotificationMessage`）。
-2. **清洗拦截 (`convert_to_llm`)**：在将上下文发往 LLM 产生下一次推理前，框架会触发该钩子。你可以自由地“过滤掉 UI 消息”、“降维压缩长文本”或“转化复杂的卡片为简单可读的系统报告”。
-3. **原生工具支持 (`AgentTool`)**：内置对 Function Calling 的闭环支持。模型输出的工具调用会自动分发到相应的 Python 异步函数上，并且允许你在漫长的执行中抛出动态进度（`on_update`）。
-4. **动态干预 (`Steering`)**：模型或工具在跑的时候，用户突然又发了一句话？直接调用 `agent.steer()`，引擎会立刻中止排队中的其他动作，并把新指令加入上下文立刻开启新的推理轮回！
+由于这是一个在 [OpenClaw](https://github.com/) 原有 `agent_core` 之上进行深度重构的版本，老的文档已归档至 [`openclaw_agent_loop_readme.md`](./openclaw_agent_loop_readme.md) 供参考比对。
 
 ---
 
-## 🛠 快速起步
+## 核心设计理念
 
-### 1. 业务定义：定制属于你的 UI 消息与工具
+AgentCore 的设计目标是：**不绑定任何具体业务逻辑或提示词格式，只做最严密的安全验证和上下文流转分发**。
 
-假设你想让 AI 能查天气，并在发请求的中途展示一个加载 UI。
+它摒弃了将巨量执行数据直接塞给 LLM 或修改全局环境的做法，引入了**环境检查器 (Environment Inspector)** 和**状态增量 (State Delta)** 架构。它将“智体思考”与“世界状态”清楚地分割开来。
 
-```python
-from dataclasses import dataclass
-from caveclaw.agent_core import CustomMessage, AgentTool, AgentToolResult
+## 目录结构
+- `types.py`: 提供高度结构化的数据规约 (Protocol)，定义了诸如 `AgentContext`, `ToolResult`, `AgentEvent` 以及生命周期钩子 `AgentLoopConfig`。
+- `agent_loop.py`: 核心状态机 `run_loop`。采用 `yield` 形式向外透明地暴露异步的层次化事件节点。
+- `agent.py`: 维护上层队列状态，提供人工打断 (Steering) 和队列追加 (Follow-up) 的控制句柄。
+- `inspector.py`: （新增）提供底层运行环境的数据抓取与安全浓缩机制 (`StateReducer`)。
 
-@dataclass
-class LoadingCard(CustomMessage):
-    """一个不需要给大模型看的 UI 加载卡片"""
-    custom_type: str = "loading_ui"
-    text: str = ""
+---
 
-class WeatherTool(AgentTool):
-    def __init__(self):
-        super().__init__(
-            name="get_weather",
-            label="获取实时天气",
-            description="获取给定城市的天气信息",
-            parameters={"type": "object", "properties": {"city": {"type": "string"}}}
-        )
+## 架构亮点
 
-    async def execute(self, tool_call_id: str, params: dict, on_update=None) -> AgentToolResult:
-        # 在这里执行你真正的业务逻辑
-        import asyncio
-        await asyncio.sleep(1) # 模拟网络请求
-        city = params.get("city", "未知城市")
-        return AgentToolResult(
-            content=f"{city}今天晴朗，25度。", 
-            details={"raw_data": {"temp": 25, "condition": "sunny"}}
-        )
+### 1. 深度可观测的进度树 (Hierarchical Agent Events)
+在 `run_loop` 中的每一步迭代，都会向外抛出包含 `event_id` 和 `parent_id` 的结构化 `AgentEvent` 事件。
+UI 前端可借此画出极为优美的任务拆解树，例如：
+```
+└─ agent_start (id: A)
+   ├─ turn_start (id: B, parent: A)
+   │  ├─ tool_execution_start (id: C, parent: B, tool: SQLQuery)
+   │  └─ tool_execution_success (id: D, parent: C)
+   └─ turn_end (parent: B)
 ```
 
-### 2. 配置引擎大脑：实现 `AgentLoopConfig`
+### 2. 底线保护熔断器 (Fail-Safe Quotas)
+为防止 AI陷入不可控的无限生成或烧费：
+- **`MAX_ROUNDS`**: 单次推理的最大往复轮数。一旦超过（如发生找数据的死循环），触发 `consolidation_required` 事件，通知外部触发记忆归档系统（Phase 3）。
+- **`MAX_CONSECUTIVE_FAILURES`**: 连环纠错容忍度。如果模型连续不断地执行报错指令（如写错 5 次 SQL），立即触发 `human_intervention_required` 人工求助信号。
 
-你需要告诉引擎，如何把大杂烩的消息净化成干净的结构，以及是否有人工干预。
+### 3. 环境状态减噪器 (Context-Aware Tools & Reducers)
+- **`State Delta`**: 工具层只能通过返回 `ToolResult(content="成功", state_delta={...})` 来安全地更新环境。执行引擎会以合并字典的形式更新 `AgentContext.shared_memory`。
+- **`PythonRuntimeInspector`**: 在面对动辄几 GB 或几万行的 DataFrame / List 时，自动挂载的 `Reducer` (如 PandasReducer) 会将其“降噪压缩”为包含 `shape`、`memory_usage` 及 `head(3)` 的无害字符串摘要，彻底避免模型 Context Window 爆炸。
 
-```python
-from caveclaw.agent_core import AgentLoopConfig, AgentMessage, Message
+---
 
-class MyConfig(AgentLoopConfig):
-    async def convert_to_llm(self, messages: list[AgentMessage]) -> list[Message]:
-        clean_msgs = []
-        for msg in messages:
-            # 标准消息直接放行
-            if isinstance(msg, Message):
-                clean_msgs.append(msg)
-            # 遇到 UI 加载卡片，大模型不需要知道，直接滤除！
-            elif isinstance(msg, LoadingCard):
-                continue
-        return clean_msgs
-        
-    async def transform_context(self, messages):
-        # 预留的上下文压缩钩子，比如在这里可以统一切除过老的聊天记录
-        return messages
-```
+## 示例用法 (Quick Start)
 
-### 3. 主程序：创建 Agent 并启动流式事件引擎
-
-`agent.prompt()` 是一个非常灵活的异步生成器，它会在执行的不同阶段吐出 `AgentEvent` 事件，非常适合用来挂接前端 WebSocket。
+定义你的 Config 和 Context-Aware Tool：
 
 ```python
 import asyncio
-from caveclaw.agent_core import Agent, UserMessage
+from typing import Dict, Any
+from agent_core.types import AgentTool, ToolResult, AgentContext
+from agent_core.inspector import PythonRuntimeInspector
 
-# 假设这是一个对齐 OpenAI 流式响应格式的包裹函数 (需自行对接真实的 LLM)
-async def mock_stream_llm(messages):
-    yield {"content": "今天"}
-    yield {"content": "天气不错"}
-    
-async def main():
-    agent = Agent(config=MyConfig(), tools=[WeatherTool()])
-    agent.set_system_prompt("你是一个得力的气象助手。")
-    
-    # 用户提问！
-    user_msg = UserMessage(content="北京今天热吗？")
-    
-    # 模拟前端收听运行状态事件
-    async for event in agent.prompt(user_msg, mock_stream_llm):
-        if event.type == "agent_start":
-            print("▶️ 推理启动...")
-        elif event.type == "turn_start":
-            print("🔄 新的一轮推理...")
-        elif event.type == "turn_end":
-            msg = event.data["message"]
-            print(f"✅ 回复完成: {msg.content}")
-            if "tool_results" in event.data and event.data["tool_results"]:
-                print(f"🔧 执行了工具，并回收结果！")
+class FakeDBTool(AgentTool):
+    def __init__(self):
+        super().__init__("query_db", "查询用户库", {"sql": "str"}, "Query")
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    async def execute(self, tool_call_id: str, params: Dict[str, Any], context: AgentContext, on_update=None) -> ToolResult:
+        # 你可以从外部取到之前积累的安全上下文
+        last_table_name = context.shared_memory.get("last_queried_table", "users")
+        
+        # 不要把10万条数据转成字符串，塞进 state_delta 里
+        huge_data_struct = {"users": [{"name": "Auth"} for _ in range(100000)]}
+        return ToolResult(
+            content="查询完成，详情见上下文环境。",
+            state_delta={"last_queried_table": "users", "raw_data": huge_data_struct}
+        )
 ```
 
-## 🧩 核心 API 纵览
+当你需要大模型在下一轮感知这些数据时，通过 `PythonRuntimeInspector` 提纯状态给大模型：
+```python
+inspector = PythonRuntimeInspector()
+report = await inspector.capture_state(agent_context)
+print(report) 
+# LLM 看到的只有： Dict with 10 keys: ... <Truncated> 
+# 完美避开了长度超标错误。
+```
 
-### `Agent` (外观模式核心)
-- `agent.steer(message)`: **神技**。当 Agent 正在执行一长串任务时，你可以强行塞入一条引导消息，它会在当前工具完成后立刻跳过剩余任务，直接带上你的引导发起下一轮 LLM 对话。
-- `agent.follow_up(message)`: 追加一条消息，但不同于 steer，它一定要等 AI 自己把话全说完、所有附带工具全部执行完且主动停下后，才会触发处理。
-- `agent.replace_messages(messages)`: 覆盖完整的历史记录，适合于“恢复保存的会话草稿”。
-
-### `AgentEvent` 生命周期
-从 `agent.prompt(...)` 吐出的事件极速响应 UI：
-- `agent_start` / `agent_end`
-- `turn_start` / `turn_end` (夹带着这段 turn 生成出来的最新一句话 `message` 及其触发的 `tool_results`)
+> **Roadmap:** 未来将在外部集成 `Planning-with-Files` 模块，通过结合外设磁盘实现跨任务的 Multi-Agent 文件流转。

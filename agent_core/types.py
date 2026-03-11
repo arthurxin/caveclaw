@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Union, Protocol, AsyncGenerator, Set
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Message:
     role: str
     content: str
@@ -18,7 +18,7 @@ class ToolCall:
     arguments: Dict[str, Any]
 
 
-@dataclass
+@dataclass(kw_only=True)
 class AssistantMessage(Message):
     role: str = "assistant"
     tool_calls: Optional[List[ToolCall]] = None
@@ -30,7 +30,7 @@ class AssistantMessage(Message):
         return d
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ToolResultMessage(Message):
     role: str = "tool"
     tool_call_id: str = ""
@@ -50,8 +50,39 @@ class CustomMessage:
 AgentMessage = Union[Message, CustomMessage]
 
 
+AgentMessage = Union[Message, CustomMessage]
+
+
+@dataclass
+class AgentContext:
+    """The context passed to tools during execution, providing access to shared memory and history."""
+    messages: List[AgentMessage]
+    shared_memory: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ToolResult:
+    """The structured result returned by a Context-Aware Tool."""
+    content: str
+    state_delta: Optional[Dict[str, Any]] = None
+
+
+class StateReducer(Protocol):
+    """Protocol for reducing large objects (like DataFrames) into LLM-friendly summaries."""
+    def reduce(self, obj: Any) -> str:
+        ...
+
+
+class EnvironmentInspector(Protocol):
+    """Protocol for capturing runtime state/metadata after tool executions."""
+    async def capture_state(self, context: AgentContext) -> str:
+        """Returns a string summary of the critical runtime environment."""
+        ...
+
+
 @dataclass
 class AgentToolResult:
+    # Deprecated in favor of the new ToolResult returning state_delta
     content: str
     details: Any = None
 
@@ -77,13 +108,19 @@ class AgentTool:
         self,
         tool_call_id: str,
         params: Dict[str, Any],
+        context: AgentContext,
         on_update: Optional[AgentToolUpdateCallback] = None
-    ) -> AgentToolResult:
+    ) -> ToolResult:
         raise NotImplementedError
 
 
 class AgentLoopConfig(Protocol):
     """Configuration for the agent loop."""
+    
+    # --- New Safety Limits ---
+    # Optional properties to control the agent loop boundaries (with fallbacks in run_loop)
+    max_rounds: Optional[int]
+    max_consecutive_tool_failures: Optional[int]
 
     async def convert_to_llm(self, messages: List[AgentMessage]) -> List[Message]:
         """Convert mixed messages to LLM-compatible format."""
@@ -116,5 +153,7 @@ class AgentState:
 
 @dataclass
 class AgentEvent:
-    type: str
+    type: str # e.g. "agent_start", "turn_start", "tool_execution_start", etc.
     data: Dict[str, Any] = field(default_factory=dict)
+    event_id: Optional[str] = None
+    parent_id: Optional[str] = None

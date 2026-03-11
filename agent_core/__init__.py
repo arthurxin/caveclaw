@@ -12,7 +12,7 @@ from .types import (
     AgentEvent
 )
 from .agent import Agent
-from .agent_loop import run_loop, execute_tool_calls
+from .agent_loop import run_loop
 
 __all__ = [
     "Message",
@@ -27,6 +27,5 @@ __all__ = [
     "AgentState",
     "AgentEvent",
     "Agent",
-    "run_loop",
-    "execute_tool_calls"
+    "run_loop"
 ]
