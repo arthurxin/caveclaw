@@ -1,0 +1,82 @@
+{
+  "providers": {
+    "openai": {
+      "api": "openai-chat",
+      "apiKey": "OPENAI_API_KEY",
+      "models": [
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "contextWindow": 128000
+        },
+        {
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o Mini",
+          "contextWindow": 128000
+        },
+        {
+          "id": "o1-preview",
+          "name": "o1 Preview",
+          "reasoning": true
+        }
+      ]
+    },
+    "anthropic": {
+      "api": "anthropic-messages",
+      "apiKey": "ANTHROPIC_API_KEY",
+      "models": [
+        {
+          "id": "claude-3-5-sonnet-20241022",
+          "name": "Claude 3.5 Sonnet",
+          "contextWindow": 200000
+        },
+        {
+          "id": "claude-3-5-haiku-20241022",
+          "name": "Claude 3.5 Haiku",
+          "contextWindow": 200000
+        }
+      ]
+    },
+    "google": {
+      "api": "google-gemini",
+      "apiKey": "GEMINI_API_KEY",
+      "models": [
+        {
+          "id": "gemini-pro-latest",
+          "name": "Gemini Pro Latest"
+        },
+        {
+          "id": "gemini-1.5-pro",
+          "name": "Gemini 1.5 Pro"
+        },
+        {
+          "id": "gemini-1.5-flash",
+          "name": "Gemini 1.5 Flash"
+        }
+      ]
+    },
+    "minimax": {
+      "api": "minimax-local",
+      "apiKey": "MINIMAX_API_KEY",
+      "baseUrl": "https://oneapi.hkgai.net/v1",
+      "models": [
+        {
+          "id": "minimax",
+          "name": "MiniMax m2.5",
+          "reasoning": true
+        }
+      ]
+    },
+    "volcengine": {
+      "api": "ark",
+      "apiKey": "ARK_API_KEY",
+      "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
+      "models": [
+        {
+          "id": "doubao-seed-2-0-lite-260215",
+          "name": "ARK模型"
+        }
+      ]
+    }
+  }
+}

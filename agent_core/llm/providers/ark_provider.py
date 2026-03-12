@@ -1,7 +1,15 @@
 """
-OpenAI Provider adapter.
-Normalizes the OpenAI Streaming API response chunks into the unified dict format
-expected by agent_loop.
+Volcengine ARK Provider adapter.
+火山引擎方舟大模型 API 适配器。
+
+使用官方 volcenginesdkarkruntime SDK（而非 OpenAI SDK），
+支持 doubao 系列模型，model 参数使用「模型名」或「endpoint_id」均可。
+
+安装依赖:
+    uv add 'volcengine-python-sdk[ark]'
+
+.env 配置:
+    ARK_API_KEY=your-ark-api-key
 """
 import os
 import json
@@ -10,22 +18,20 @@ from typing import AsyncGenerator, Dict, Any, List, Optional
 from ..provider_types import Model
 from ..api_registry import StreamOptions
 
+ARK_DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 
-class OpenAiProvider:
+
+class ArkProvider:
     """
-    Implements the ApiProvider protocol for the OpenAI Completions API.
-    Handles both regular text content and streamed tool_calls delta assembly.
-
-    Supports:
-    - openai (official api)
-    - openai-compatible APIs (DeepSeek, Groq, etc.) via custom baseUrl
+    Implements the ApiProvider protocol for Volcengine ARK models.
+    Uses the official volcenginesdkarkruntime (Ark client).
 
     base_url resolution priority:
       1. model.baseUrl (from models.json, if set)
-      2. OPENAI_BASE_URL env var
-      3. default: None (uses official OpenAI endpoint)
+      2. ARK_BASE_URL env var
+      3. default: https://ark.cn-beijing.volces.com/api/v3
     """
-    api = "openai-chat"
+    api = "ark"
 
     async def stream(
         self,
@@ -35,16 +41,26 @@ class OpenAiProvider:
         api_key: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         try:
-            from openai import AsyncOpenAI
+            from volcenginesdkarkruntime import AsyncArk
         except ImportError:
-            raise ImportError("openai package is required: uv add openai")
+            raise ImportError(
+                "volcenginesdkarkruntime package is required: "
+                "uv add 'volcengine-python-sdk[ark]'"
+            )
 
-        key = api_key or os.environ.get("OPENAI_API_KEY")
-        base_url = model.baseUrl or os.environ.get("OPENAI_BASE_URL") or None
+        key = api_key or os.environ.get("ARK_API_KEY")
+        if not key:
+            raise ValueError("No ARK API key found. Set ARK_API_KEY in .env")
 
-        client = AsyncOpenAI(api_key=key, base_url=base_url)
+        base_url = (
+            model.baseUrl
+            or os.environ.get("ARK_BASE_URL")
+            or ARK_DEFAULT_BASE_URL
+        )
 
-        # Build tools payload if provided
+        client = AsyncArk(api_key=key, base_url=base_url)
+
+        # Build tools payload if provided (OpenAI-compatible format)
         openai_tools = None
         if options.tools:
             openai_tools = [
@@ -60,18 +76,17 @@ class OpenAiProvider:
             ]
 
         kwargs: Dict[str, Any] = dict(
-            model=model.id,
+            model=model.id,   # endpoint_id 或 doubao-seed-2-0-lite-260215 等模型名
             messages=messages,
         )
         if openai_tools:
             kwargs["tools"] = openai_tools
-        if options.thinking_level in ("high", "xhigh") and model.reasoning:
-            kwargs["reasoning_effort"] = "high"
+            kwargs["tool_choice"] = "auto"
 
         # Accumulator for streaming tool call fragments
         tool_call_accum: Dict[int, Dict[str, Any]] = {}
 
-        # Use standard create(stream=True) to get raw SSE chunks
+        # AsyncArk.chat.completions.stream 返回 OpenAI 兼容的 chunk 格式
         stream_resp = await client.chat.completions.create(**kwargs, stream=True)
         async for chunk in stream_resp:
             delta = chunk.choices[0].delta if chunk.choices else None
