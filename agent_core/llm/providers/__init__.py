@@ -6,5 +6,6 @@ dictionary format expected by the CaveClaw agent engine.
 from .openai_provider import OpenAiProvider
 from .anthropic_provider import AnthropicProvider
 from .google_provider import GoogleProvider
+from .minimax_provider import MiniMaxProvider
 
-__all__ = ["OpenAiProvider", "AnthropicProvider", "GoogleProvider"]
+__all__ = ["OpenAiProvider", "AnthropicProvider", "GoogleProvider", "MiniMaxProvider"]
