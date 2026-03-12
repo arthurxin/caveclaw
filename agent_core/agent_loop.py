@@ -15,15 +15,65 @@ load_dotenv()
 
 async def _stream_assistant_response(
     messages: List[Message],
-    stream_fn: Callable[..., AsyncGenerator[Any, None]],
-    config: AgentLoopConfig
+    config: AgentLoopConfig,
+    stream_fn: Optional[Callable[..., AsyncGenerator[Any, None]]] = None,
+    yield_event: Optional[Callable] = None,
 ) -> AssistantMessage:
-    """Wrapper that reads from the provided stream_fn and constructs standard AssistantMessage."""
+    """
+    Builds an AssistantMessage from the LLM response stream.
+
+    Priority:
+    1. If a legacy `stream_fn` is passed, use it directly (backward compat).
+    2. Otherwise, look up the correct ApiProvider via config.model.api and dispatch.
+
+    Also handles `{reasoning: ...}` chunks from CoT providers (e.g. MiniMax),
+    emitting them as AgentEvents if a yield_event callback is provided.
+    """
     assistant_msg = AssistantMessage(role="assistant", content="")
-    
-    # In a full real-world app, stream_fn yields diffs/events 
-    # matching the underlying AI provider.
-    async for chunk in stream_fn(messages):
+
+    # ---- Path 1: legacy stream_fn (backward compat) ----
+    if stream_fn is not None:
+        async for chunk in stream_fn(messages):
+            if "content" in chunk:
+                assistant_msg.content += chunk["content"]
+            elif "tool_calls" in chunk:
+                if not assistant_msg.tool_calls:
+                    assistant_msg.tool_calls = []
+                for tc in chunk["tool_calls"]:
+                    assistant_msg.tool_calls.append(ToolCall(**tc))
+        return assistant_msg
+
+    # ---- Path 2: Universal ApiProvider dispatch ----
+    from .llm.api_registry import api_provider_registry, StreamOptions
+
+    model = getattr(config, "model", None)
+    if model is None:
+        raise ValueError(
+            "Neither `stream_fn` nor `config.model` was provided. "
+            "Please set config.model to an agent_core.llm.Model instance, "
+            "or pass a `stream_fn` for legacy use."
+        )
+
+    provider = api_provider_registry.get(model.api)
+    if provider is None:
+        raise ValueError(
+            f"No ApiProvider registered for api type '{model.api}'. "
+            f"Did you forget to call api_provider_registry.register(YourProvider())?"
+        )
+
+    options = StreamOptions()
+    options.thinking_level = getattr(config, "thinking_level", "off") or "off"
+    options.system_prompt = getattr(config, "system_prompt", None)
+    options.tools = None  # Tools are passed separately; providers should NOT need them here
+                          # since tool declarations come from the messages themselves or config
+
+    # Resolve api_key from model's registry if available
+    api_key = None
+    registry = getattr(config, "model_registry", None)
+    if registry and hasattr(registry, "get_api_key"):
+        api_key = registry.get_api_key(model.provider)
+
+    async for chunk in provider.stream(model, [m.to_dict() for m in messages], options, api_key=api_key):
         if "content" in chunk:
             assistant_msg.content += chunk["content"]
         elif "tool_calls" in chunk:
@@ -31,7 +81,15 @@ async def _stream_assistant_response(
                 assistant_msg.tool_calls = []
             for tc in chunk["tool_calls"]:
                 assistant_msg.tool_calls.append(ToolCall(**tc))
-                
+        elif "reasoning" in chunk:
+            # CoT providers (e.g. MiniMax) emit reasoning blocks separately.
+            # Surface it as an event so the UI/logs can display chain-of-thought.
+            if yield_event:
+                yield_event(AgentEvent(
+                    type="reasoning",
+                    data={"reasoning": chunk["reasoning"]}
+                ))
+
     return assistant_msg
 
 
@@ -39,9 +97,15 @@ async def run_loop(
     context_messages: List[AgentMessage],
     tools: List[AgentTool],
     config: AgentLoopConfig,
-    stream_fn: Callable[..., AsyncGenerator[Any, None]]
+    stream_fn: Optional[Callable[..., AsyncGenerator[Any, None]]] = None,
 ) -> AsyncGenerator[AgentEvent, None]:
-    """The core state machine loop (enhanced with Phase 1 safety limits and structural events)."""
+    """
+    The core state machine loop (enhanced with Phase 1 safety limits and structural events).
+
+    `stream_fn` is OPTIONAL for backward compatibility only.
+    New code should set `config.model` to an `agent_core.llm.Model` instance instead,
+    and ensure the corresponding ApiProvider is registered in `api_provider_registry`.
+    """
     
     # Read limits from Config first, then .env, then fallback to defaults
     env_max_rounds = int(os.environ.get("MAX_ROUNDS", "20"))
@@ -97,7 +161,16 @@ async def run_loop(
         )
         
         # 3. Stream Response
-        assistant_msg = await _stream_assistant_response(llm_messages, stream_fn, config)
+        # Collect reasoning events emitted by CoT providers (e.g. MiniMax) during streaming
+        pending_events: list = []
+        assistant_msg = await _stream_assistant_response(
+            llm_messages, config,
+            stream_fn=stream_fn,
+            yield_event=pending_events.append,
+        )
+        # Surface any reasoning events now (before turn_end so UI sees them in order)
+        for evt in pending_events:
+            yield evt
         context_messages.append(assistant_msg)
         
         # 4. Check array of Tool Calls

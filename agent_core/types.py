@@ -122,6 +122,14 @@ class AgentLoopConfig(Protocol):
     max_rounds: Optional[int]
     max_consecutive_tool_failures: Optional[int]
 
+    # --- LLM Wrapper Integration (Phase 4) ---
+    # When provided, the engine uses the universal ApiProvider dispatch instead
+    # of a hard-wired `stream_fn`. Callers may omit these and pass a `stream_fn`
+    # directly to run_loop for backward compatibility.
+    model: Optional[Any]          # agent_core.llm.Model instance
+    thinking_level: Optional[str] # "off" | "low" | "medium" | "high" | "xhigh"
+    system_prompt: Optional[str]  # injected as system message for providers that support it
+
     async def convert_to_llm(self, messages: List[AgentMessage]) -> List[Message]:
         """Convert mixed messages to LLM-compatible format."""
         ...
