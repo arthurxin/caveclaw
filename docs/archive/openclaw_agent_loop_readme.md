@@ -1,6 +1,6 @@
-# CaveClaw Agent Loop (src/agent_loop.py) 核心设计说明
+# CaveClaw Legacy Agent Loop 核心设计说明
 
-`src/agent_loop.py` 提供了一个**双层嵌套（内循环多轮对话 + 外循环递归重试）**的轻量级 LLM 工具调用执行框架。该版本与 `agent_core` 下的异步事件驱动流不同，它是一个更加面向**状态突变（State Mutation）**和**结果审视（Recursive Review）**的紧凑型架构，高度耦合于 `MinimaxCalling` 客户端。
+`examples/legacy/agent_loop.py` 提供了一个**双层嵌套（内循环多轮对话 + 外循环递归重试）**的轻量级 LLM 工具调用执行框架。该版本与 `agent_core` 下的异步事件驱动流不同，它是一个更加面向**状态突变（State Mutation）**和**结果审视（Recursive Review）**的紧凑型架构，高度耦合于 `MinimaxCalling` 客户端。
 
 ## 1. 核心设计思路
 

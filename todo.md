@@ -1,37 +1,66 @@
-# CaveClaw AgentCore 重构计划 (TODO)
-> 基于 `agent_core` (异步流式引擎) 与 `src` (业务双层循环架构) 的融合设计。
+# CaveClaw TODO
 
-## Phase 1: 核心生命周期与骨架重构 (**已完成**)
-- ✅ **层次化 AgentEvent 重构**: 在 `types.py` 中为 `AgentEvent` 增加了 `event_id` 和 `parent_id` 属性，支持前端渲染酷炫的子树形进度流。
-- ✅ **配置防线引入**: 在 `.env` 及 `agent_loop.py` 中引入了 `max_rounds` 和 `max_consecutive_tool_failures` 机制。
-- ✅ **内联式 (Inline) 引擎重写**: 将工具执行合并进了主状态机 `run_loop` 中，让大模型思维步骤可以随时 `yield` 最新的一手内部消息。
-- ✅ **熔断与求援钩子**: 实装了达到条件时自动抛出 `consolidation_required` (请应用层处理记忆浓缩) 和 `human_intervention_required` (死活配不对工具时的求救)。
+## 当前状态
 
-## Phase 4: 万能 LLM 包装器 (`Universal LLM Wrapper`) (**已完成**)
-- ✅ **模型与厂商定义**: 复刻了 `api_registry` 和 `providers` 体系，隔离了供应商 SDK。
-- ✅ **动态模型解析 (`ModelResolver`)**: 支持 `provider/model_id:thinking_level` 格式的智能路由。
-- ✅ **多厂商支持**: 实装了 OpenAI (及兼容接口), Anthropic, Google Gemini 以及 MiniMax (带 Think 块剥离)。
-- ✅ **引擎原生接入**: `agent_loop.py` 已支持通过 `ApiProvider` 动态派发，`stream_fn` 已变为可选。
+### 已完成
 
-## Phase 5: 智能基础设施与工程化 (计划中)
-> 借鉴 OpenClaw (pi-mono) 的工程化实践，优化 Agent 的“智商”与“体感”。
-- [ ] **动态提示词管理器 (`SystemPromptBuilder`)**: 实现模块化 Prompt 拼接，根据当前工具和环境自动裁剪指令，节省 Token。
-- [ ] **技能延迟加载 (`Skill Registry & Lazy Loading`)**: 
-    - 引入 `skills/` 目录规范，Prompt 里只放简介。
-    - 增加 `read_skill` 工具，让 AI 自主按需读取详细手册。
-- [ ] **输出抑制 (`NO_REPLY`)**: 在 `agent_loop` 层面处理静默回复令牌，杜绝无意义的对话生成。
+- [x] 将消息协议升级到 block-based 主路径，同时保留旧 `content` 调用的兼容访问器。
+- [x] 为 `AssistantMessage` 增加 `raw_content`，给 provider replay 留出统一协议位。
+- [x] 引入 `RuntimeState / RuntimeVariable / RuntimeDeltaOp` 基础骨架。
+- [x] 为 `agent_loop` 补上 `message_start / message_update / message_end`。
+- [x] 为工具执行链路补上 `tool_execution_update`、`signal` 接口位和 `runtime_ops` 入口。
+- [x] 为 `Agent` 补上基础控制面：`continue_run()`、队列模式、`wait_for_idle()`。
+- [x] 为 `max_rounds` 场景补上轻量级 `handle_consolidation()` hook。
 
-## Phase 6: 企业级增强与自主性 (愿景)
-- [ ] **子智能体协作 (`Subagent Orchestration`)**: 支持 `sessions_spawn`，让 Agent 能够派生小号并行处理子任务。
-- [ ] **长效记忆系统 (`Long-term Memory`)**: 实现 `shared_memory` 的文件持久化与 RAG 检索。
-- [ ] **人工审批流 (`Human-in-the-loop`)**: 针对高危工具（如删除、部署）增加 AgentEvent 级别的中断确认机制。
-- [ ] **标准化推理事件**: 统一所有厂商的 CoT (Think 块) 吞吐协议。
+## 当前优先级
 
----
+### P0: 把 runtime 驱动 loop 做完整
 
-## ⏸ 暂停/延后优化的功能 (Suspended / Backlog)
-1. **[暂停] 人工逐行审核 (Blocking Steering Phase)**
-   - 原因讨论: 让用户每调一个工具就人工确认一次太花人力/时间。
-   - 妥协点: 修改为了仅日志记录 (Observation-only Steering)。
-2. **[暂停] 动态并发调度机制 (Dependency-Aware Execution & DAG)**
-   - 纳入 Phase 6 的并行化考量，暂不作为底层强制要求。
+- [x] 将 `agent_loop` 改成真正的 runtime 驱动主循环：
+  一轮开始先注入 runtime snapshot，工具批次结束后统一 commit `runtime_ops`，生成新 snapshot 和短 worklog，再决定是否继续当前内层工具循环；当内层结束后，带着新的 snapshot 和 worklog 进入下一次外层审查。
+- [x] 将 runtime snapshot 注入策略收紧为“只在需要重新交给模型思考之前注入”：
+  避免重复注入无变化状态，但允许工具批次结束后立即生成新的世界状态投影。
+- [x] 给 worklog 设计正式 block/tag：
+  它表示工作轨迹，会进入后续 loop 的初始信息，但不应污染 UI-only 日志。
+
+### P0.5: 把 runtime 变量语义补清楚
+
+- [x] 为工具/技能增加变量声明伪接口：
+  例如 `reads / writes / temp_outputs`，用于说明该工具想读取哪些变量、产生哪些中间变量和输出变量。
+- [x] 完成 `RuntimeState.apply_ops()` 的规范化实现：
+  把 `set / delete / merge / append / touch / replace_blocks` 收口到统一提交路径。
+- [ ] 细化 `RuntimeVariable.kind` 的处理策略：
+  `opaque / structured / tabular / message_blocks / binary_ref` 的 inspector 行为要不同。
+
+### P1: 把 compaction 变成每次发给 provider 前的可扩展步骤
+
+- [x] 明确 compaction 的职责边界：
+  它主要发生在 `AgentMessage -> llm_provider message` 之间，负责去掉不该给 LLM 的 UI/log 富文本，压缩工作轨迹，并控制 runtime snapshot 的可见粒度。
+- [x] 把 compaction 做成可扩展模块：
+  现在先做“过滤 UI-only / log-only blocks + 裁剪 runtime metadata”的基础版，之后再扩展为更复杂的上下文压缩策略。
+- [ ] 为 compaction 留下扩展 TODO：
+  未来支持 token budget、变量级摘要策略、不同 provider 的差异化压缩规则。
+
+### P1.5: 把 provider 适配层做稳
+
+- [ ] 统一 provider 的工具调用、reasoning 事件和 usage 输出格式。
+- [ ] 把 `minimax_local` 的特殊 replay 语义完全封装在 provider 内：
+  runtime 在 `AgentMessage` 之上，provider 在 `AgentMessage` 之下，统一层仍然是 `AgentMessage`。
+- [x] 引入 provider codec 基础层：
+  让 `raw_content / provider_state` 的解释权逐步下沉到 provider 适配层，而不是继续堆在 loop 里。
+- [ ] 给 `ModelRegistry` 增加更清楚的加载错误与配置校验。
+
+### P2: 暂时只记 TODO，不急着实现
+
+- [ ] UI runtime 面板：
+  在涉及 `RuntimeVariable` 时，UI 显示更用户友好的可视化信息，而不是直接给 LLM 的 metadata 摘要。
+- [ ] 子智能体 runtime 隔离：
+  subagent 默认拥有独立 runtime，之后再决定如何继承父级快照或回写父级结果。
+- [ ] 工具/技能变量编排：
+  当前只补了 `reads / writes / temp_outputs` 和 runtime selection 伪接口；真正的 tool calling / variable orchestration 之后按自定义方案继续写，不走传统兼容式实现。
+
+## 暂不优先
+
+- [ ] 为了“看起来更聪明”而把太多业务逻辑塞进核心层。
+- [ ] 过早做 DAG / 并发编排。
+- [ ] 在没有稳定测试前继续快速扩 provider 数量。

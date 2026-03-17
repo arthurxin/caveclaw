@@ -5,6 +5,10 @@ together to stream a response through the CaveClaw engine.
 """
 import asyncio
 import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 from agent_core.llm import ModelRegistry, ModelResolver, api_provider_registry, StreamOptions
 from agent_core.llm.providers import OpenAiProvider, AnthropicProvider
 from agent_core.types import AgentTool, ToolResult, AgentContext

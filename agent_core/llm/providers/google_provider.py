@@ -15,6 +15,7 @@ from typing import AsyncGenerator, Dict, Any, List, Optional
 
 from ..provider_types import Model
 from ..api_registry import StreamOptions
+from ..message_codec import GoogleMessageCodec
 
 
 class GoogleProvider:
@@ -27,6 +28,7 @@ class GoogleProvider:
     - google-vertex (Vertex AI, requires different auth)
     """
     api = "google-gemini"
+    message_codec = GoogleMessageCodec()
 
     async def stream(
         self,
@@ -89,7 +91,11 @@ class GoogleProvider:
             for part in chunk.parts:
                 # Text content fragment
                 if hasattr(part, "text") and part.text:
-                    yield {"content": part.text}
+                    provider_state = _extract_gemini_provider_state(part)
+                    payload: Dict[str, Any] = {"content": part.text}
+                    if provider_state:
+                        payload["provider_state"] = {"gemini": provider_state}
+                    yield payload
 
                 # Function call (tool call)
                 elif hasattr(part, "function_call") and part.function_call:
@@ -99,13 +105,17 @@ class GoogleProvider:
                         args = dict(fc.args) if fc.args else {}
                     except Exception:
                         args = {}
-                    yield {
+                    provider_state = _extract_gemini_provider_state(part)
+                    payload: Dict[str, Any] = {
                         "tool_calls": [{
                             "id": f"call_{fc.name}_{id(fc)}",  # Gemini doesn't give call IDs
                             "name": fc.name,
                             "arguments": args,
                         }]
                     }
+                    if provider_state:
+                        payload["provider_state"] = {"gemini": provider_state}
+                    yield payload
 
 
 def _sanitize_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
@@ -145,12 +155,44 @@ def _convert_messages(
 
     for msg in conversation:
         role = msg.get("role", "user")
+        provider_state = (msg.get("provider_state") or {}).get("gemini", {})
         content = msg.get("content", "")
         # Map OpenAI roles to Gemini roles
         gemini_role = "user" if role in ("user", "tool") else "model"
+        if provider_state.get("parts"):
+            history.append({
+                "role": gemini_role,
+                "parts": provider_state["parts"],
+            })
+            continue
         history.append({
             "role": gemini_role,
             "parts": [{"text": content}],
         })
 
     return history, last_user_msg
+
+
+def _extract_gemini_provider_state(part: Any) -> Optional[Dict[str, Any]]:
+    thought_signature = getattr(part, "thought_signature", None)
+    if not thought_signature:
+        return None
+
+    part_payload: Dict[str, Any] = {}
+    if hasattr(part, "text") and part.text:
+        part_payload["text"] = part.text
+    if hasattr(part, "function_call") and part.function_call:
+        try:
+            arguments = dict(part.function_call.args) if part.function_call.args else {}
+        except Exception:
+            arguments = {}
+        part_payload["function_call"] = {
+            "name": part.function_call.name,
+            "args": arguments,
+        }
+    part_payload["thoughtSignature"] = thought_signature
+
+    return {
+        "parts": [part_payload],
+        "thought_signatures": [thought_signature],
+    }

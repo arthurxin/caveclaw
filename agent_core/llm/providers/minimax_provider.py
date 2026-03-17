@@ -1,6 +1,6 @@
 """
 MiniMax Provider adapter.
-基于 src/minimax_calling.py 的实现，使用 OpenAI 兼容 API。
+基于 legacy MiniMax 封装的思路，使用 OpenAI 兼容 API。
 
 Key differences from standard OpenAI:
 - 使用 OpenAI 兼容接口，但需要自定义 base_url
@@ -15,10 +15,11 @@ Key differences from standard OpenAI:
 import os
 import re
 import json
-from typing import AsyncGenerator, Dict, Any, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from ..provider_types import Model
 from ..api_registry import StreamOptions
+from ..message_codec import MiniMaxMessageCodec
 
 
 class MiniMaxProvider:
@@ -33,6 +34,39 @@ class MiniMaxProvider:
       3. default fallback: http://localhost:8080/v1
     """
     api = "minimax-local"
+    message_codec = MiniMaxMessageCodec()
+
+    @staticmethod
+    def _extract_reasoning_and_content(content_buffer: str) -> Dict[str, Optional[str]]:
+        reasoning = None
+        think_match = re.search(r"<think>(.*?)</think>", content_buffer, re.DOTALL)
+        if think_match:
+            reasoning = think_match.group(1).strip() or None
+
+        clean_content = re.sub(r"<think>.*?</think>", "", content_buffer, flags=re.DOTALL).strip()
+        return {
+            "raw_content": content_buffer,
+            "reasoning": reasoning,
+            "content": clean_content,
+        }
+
+    @staticmethod
+    def _assemble_tool_calls(tool_call_accum: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        assembled: List[Dict[str, Any]] = []
+        for idx in sorted(tool_call_accum.keys()):
+            tool_call = tool_call_accum[idx]
+            try:
+                arguments = json.loads(tool_call["arguments"]) if tool_call["arguments"] else {}
+            except json.JSONDecodeError:
+                arguments = {"raw": tool_call["arguments"]}
+            assembled.append(
+                {
+                    "id": tool_call["id"],
+                    "name": tool_call["name"],
+                    "arguments": arguments,
+                }
+            )
+        return assembled
 
     async def stream(
         self,
@@ -117,29 +151,13 @@ class MiniMaxProvider:
 
         # After stream, parse think block from accumulated content
         if content_buffer:
-            think_match = re.search(r"<think>(.*?)</think>", content_buffer, re.DOTALL)
-            if think_match:
-                reasoning = think_match.group(1).strip()
-                if reasoning:
-                    yield {"reasoning": reasoning}
-
-            # Strip <think>...</think> and yield clean content
-            clean_content = re.sub(r"<think>.*?</think>", "", content_buffer, flags=re.DOTALL).strip()
-            if clean_content:
-                yield {"content": clean_content}
-
+            parsed_content = self._extract_reasoning_and_content(content_buffer)
+            if parsed_content["reasoning"]:
+                yield {"reasoning": parsed_content["reasoning"]}
+            yield {
+                "raw_content": parsed_content["raw_content"],
+                "content": parsed_content["content"],
+            }
         # Emit assembled tool_calls if any
         if tool_call_accum:
-            assembled = []
-            for idx in sorted(tool_call_accum.keys()):
-                tc = tool_call_accum[idx]
-                try:
-                    args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-                except json.JSONDecodeError:
-                    args = {"raw": tc["arguments"]}
-                assembled.append({
-                    "id": tc["id"],
-                    "name": tc["name"],
-                    "arguments": args,
-                })
-            yield {"tool_calls": assembled}
+            yield {"tool_calls": self._assemble_tool_calls(tool_call_accum)}

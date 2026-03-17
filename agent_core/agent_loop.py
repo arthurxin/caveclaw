@@ -1,96 +1,37 @@
+from __future__ import annotations
+
 import os
 import uuid
-from typing import AsyncGenerator, List, Callable, Optional, Dict, Any, Tuple
+from typing import Any, AsyncGenerator, Callable, List, Optional
 
 from dotenv import load_dotenv
 
+from .assistant_stream import stream_assistant_response
+from .compaction import compact_messages_for_llm
+from .runtime_projection import (
+    build_worklog_message,
+    commit_runtime_ops,
+    emit_runtime_message_event,
+    inject_runtime_snapshot,
+)
+from .tool_execution import collect_tool_result_runtime_ops, execute_tool_with_streaming_updates
 from .types import (
-    AgentMessage, AgentLoopConfig, AgentTool, AgentEvent,
-    Message, AssistantMessage, ToolCall, ToolResultMessage,
-    AgentContext
+    AgentContext,
+    AgentEvent,
+    AgentLoopConfig,
+    AgentMessage,
+    AgentTool,
+    BasicCancellationSignal,
+    CancellationSignal,
+    Message,
+    RuntimeDeltaOp,
+    ToolResultMessage,
+    RuntimeState,
+    content_blocks_from_text,
 )
 
 # Load environment variables
 load_dotenv()
-
-async def _stream_assistant_response(
-    messages: List[Message],
-    config: AgentLoopConfig,
-    stream_fn: Optional[Callable[..., AsyncGenerator[Any, None]]] = None,
-    yield_event: Optional[Callable] = None,
-) -> AssistantMessage:
-    """
-    Builds an AssistantMessage from the LLM response stream.
-
-    Priority:
-    1. If a legacy `stream_fn` is passed, use it directly (backward compat).
-    2. Otherwise, look up the correct ApiProvider via config.model.api and dispatch.
-
-    Also handles `{reasoning: ...}` chunks from CoT providers (e.g. MiniMax),
-    emitting them as AgentEvents if a yield_event callback is provided.
-    """
-    assistant_msg = AssistantMessage(role="assistant", content="")
-
-    # ---- Path 1: legacy stream_fn (backward compat) ----
-    if stream_fn is not None:
-        async for chunk in stream_fn(messages):
-            if "content" in chunk:
-                assistant_msg.content += chunk["content"]
-            elif "tool_calls" in chunk:
-                if not assistant_msg.tool_calls:
-                    assistant_msg.tool_calls = []
-                for tc in chunk["tool_calls"]:
-                    assistant_msg.tool_calls.append(ToolCall(**tc))
-        return assistant_msg
-
-    # ---- Path 2: Universal ApiProvider dispatch ----
-    from .llm.api_registry import api_provider_registry, StreamOptions
-
-    model = getattr(config, "model", None)
-    if model is None:
-        raise ValueError(
-            "Neither `stream_fn` nor `config.model` was provided. "
-            "Please set config.model to an agent_core.llm.Model instance, "
-            "or pass a `stream_fn` for legacy use."
-        )
-
-    provider = api_provider_registry.get(model.api)
-    if provider is None:
-        raise ValueError(
-            f"No ApiProvider registered for api type '{model.api}'. "
-            f"Did you forget to call api_provider_registry.register(YourProvider())?"
-        )
-
-    options = StreamOptions()
-    options.thinking_level = getattr(config, "thinking_level", "off") or "off"
-    options.system_prompt = getattr(config, "system_prompt", None)
-    options.tools = None  # Tools are passed separately; providers should NOT need them here
-                          # since tool declarations come from the messages themselves or config
-
-    # Resolve api_key from model's registry if available
-    api_key = None
-    registry = getattr(config, "model_registry", None)
-    if registry and hasattr(registry, "get_api_key"):
-        api_key = registry.get_api_key(model.provider)
-
-    async for chunk in provider.stream(model, [m.to_dict() for m in messages], options, api_key=api_key):
-        if "content" in chunk:
-            assistant_msg.content += chunk["content"]
-        elif "tool_calls" in chunk:
-            if not assistant_msg.tool_calls:
-                assistant_msg.tool_calls = []
-            for tc in chunk["tool_calls"]:
-                assistant_msg.tool_calls.append(ToolCall(**tc))
-        elif "reasoning" in chunk:
-            # CoT providers (e.g. MiniMax) emit reasoning blocks separately.
-            # Surface it as an event so the UI/logs can display chain-of-thought.
-            if yield_event:
-                yield_event(AgentEvent(
-                    type="reasoning",
-                    data={"reasoning": chunk["reasoning"]}
-                ))
-
-    return assistant_msg
 
 
 async def run_loop(
@@ -98,174 +39,288 @@ async def run_loop(
     tools: List[AgentTool],
     config: AgentLoopConfig,
     stream_fn: Optional[Callable[..., AsyncGenerator[Any, None]]] = None,
+    runtime: Optional[RuntimeState] = None,
 ) -> AsyncGenerator[AgentEvent, None]:
     """
-    The core state machine loop (enhanced with Phase 1 safety limits and structural events).
-
-    `stream_fn` is OPTIONAL for backward compatibility only.
-    New code should set `config.model` to an `agent_core.llm.Model` instance instead,
-    and ensure the corresponding ApiProvider is registered in `api_provider_registry`.
+    The core state machine loop with streaming assistant lifecycle events,
+    runtime injection, and tool runtime commits.
     """
-    
-    # Read limits from Config first, then .env, then fallback to defaults
+
     env_max_rounds = int(os.environ.get("MAX_ROUNDS", "20"))
     env_max_consec_failures = int(os.environ.get("MAX_CONSECUTIVE_FAILURES", "5"))
-    
+
     max_rounds = getattr(config, "max_rounds", env_max_rounds) or env_max_rounds
-    max_consecutive_failures = getattr(config, "max_consecutive_tool_failures", env_max_consec_failures) or env_max_consec_failures
-    
-    # Initialize the runtime context for the tools
-    agent_context = AgentContext(messages=context_messages, shared_memory={})
-    
+    max_consecutive_failures = (
+        getattr(config, "max_consecutive_tool_failures", env_max_consec_failures) or env_max_consec_failures
+    )
+
+    agent_context = AgentContext(messages=context_messages, runtime=runtime or RuntimeState(), shared_memory={})
+    abort_signal: CancellationSignal = getattr(config, "abort_signal", None) or BasicCancellationSignal()
     loop_event_id = str(uuid.uuid4())
     yield AgentEvent(type="agent_start", event_id=loop_event_id)
-    
+
     round_count = 0
     consecutive_failures = 0
-    
+
     while True:
+        if abort_signal.is_cancelled:
+            break
+
+        runtime_message = await inject_runtime_snapshot(context_messages, agent_context, config)
+        async for event in emit_runtime_message_event(runtime_message, loop_event_id):
+            yield event
+
         round_count += 1
         turn_event_id = str(uuid.uuid4())
-        
-        # Consolidation check - if we hit max rounds
+
         if round_count > max_rounds:
+            consolidation_handler = getattr(config, "handle_consolidation", None)
+            if consolidation_handler:
+                consolidated_messages = await consolidation_handler(context_messages, agent_context)
+                if consolidated_messages:
+                    context_messages = list(consolidated_messages)
+                    agent_context.messages = context_messages
+                    runtime_message = await inject_runtime_snapshot(context_messages, agent_context, config)
+                    async for event in emit_runtime_message_event(runtime_message, loop_event_id):
+                        yield event
+                    yield AgentEvent(
+                        type="consolidation_applied",
+                        parent_id=loop_event_id,
+                        data={"message_count": len(context_messages), "runtime_revision": agent_context.runtime.revision},
+                    )
+                    round_count = 0
+                    continue
             yield AgentEvent(
-                type="consolidation_required", 
-                parent_id=loop_event_id, 
-                data={"reason": "max_rounds_reached", "max_rounds": max_rounds}
+                type="consolidation_required",
+                parent_id=loop_event_id,
+                data={"reason": "max_rounds_reached", "max_rounds": max_rounds},
             )
-            # Future phases will implement actual consolidation here
-            break
-            
-        # Fail-Safe Quotas check
+            yield AgentEvent(type="agent_end", parent_id=loop_event_id, data={"messages": context_messages})
+            return
+
         if consecutive_failures >= max_consecutive_failures:
             yield AgentEvent(
-                type="human_intervention_required", 
-                parent_id=loop_event_id, 
-                data={"reason": "max_consecutive_failures", "consecutive_failures": consecutive_failures}
+                type="human_intervention_required",
+                parent_id=loop_event_id,
+                data={"reason": "max_consecutive_failures", "consecutive_failures": consecutive_failures},
             )
-            break
-            
-        # 1. Transform Context (e.g. context window pruning)
+            yield AgentEvent(type="agent_end", parent_id=loop_event_id, data={"messages": context_messages})
+            return
+
         if hasattr(config, "transform_context"):
             context_messages = await config.transform_context(context_messages)
-            
-        # 2. Convert to LLM format (filter out CustomMessages/UI elements)
-        llm_messages = await config.convert_to_llm(context_messages)
-        
+            agent_context.messages = context_messages
+
+        compacted_messages = await compact_messages_for_llm(context_messages, agent_context, config)
+        llm_messages = await config.convert_to_llm(compacted_messages)
+
         yield AgentEvent(
-            type="turn_start", 
-            event_id=turn_event_id, 
-            parent_id=loop_event_id, 
-            data={"round": round_count}
+            type="turn_start",
+            event_id=turn_event_id,
+            parent_id=loop_event_id,
+            data={"round": round_count, "runtime_revision": agent_context.runtime.revision},
         )
-        
-        # 3. Stream Response
-        # Collect reasoning events emitted by CoT providers (e.g. MiniMax) during streaming
-        pending_events: list = []
-        assistant_msg = await _stream_assistant_response(
-            llm_messages, config,
+
+        pending_events: List[AgentEvent] = []
+        assistant_msg = await stream_assistant_response(
+            llm_messages,
+            tools,
+            config,
             stream_fn=stream_fn,
             yield_event=pending_events.append,
+            message_parent_id=turn_event_id,
+            signal=abort_signal,
         )
-        # Surface any reasoning events now (before turn_end so UI sees them in order)
-        for evt in pending_events:
-            yield evt
+        for event in pending_events:
+            yield event
+
         context_messages.append(assistant_msg)
-        
-        # 4. Check array of Tool Calls
+        agent_context.messages = context_messages
+
+        if assistant_msg.stop_reason == "aborted" or abort_signal.is_cancelled:
+            yield AgentEvent(
+                type="turn_end",
+                parent_id=turn_event_id,
+                data={"message": assistant_msg, "tool_results": [], "aborted": True},
+            )
+            yield AgentEvent(type="agent_end", parent_id=loop_event_id, data={"messages": context_messages})
+            return
+
         if not assistant_msg.tool_calls:
-            # End of turn, no tools -> Fully finished thinking
-            yield AgentEvent(type="turn_end", parent_id=turn_event_id, data={"message": assistant_msg})
-            
-            # Reset consecutive errors since it successfully concluded a thought
+            yield AgentEvent(
+                type="turn_end",
+                parent_id=turn_event_id,
+                data={"message": assistant_msg, "tool_results": []},
+            )
             consecutive_failures = 0
-            
-            # 5. Check Follow Up messages queue
+
             if hasattr(config, "get_followup_messages"):
                 followup = await config.get_followup_messages()
                 if followup:
                     context_messages.extend(followup)
+                    agent_context.messages = context_messages
                     continue
-            break # Fully finished
-            
-        # 6. Execute Tools (Observation-only Steering built-in to loop)
+            break
+
         steering_interrupted = False
-        
+        tool_results: List[ToolResultMessage] = []
+        batch_runtime_ops: List[RuntimeDeltaOp] = []
+
         for tool_call in assistant_msg.tool_calls:
+            tool = next((candidate for candidate in tools if candidate.name == tool_call.name), None)
+            runtime_selection = tool.resolve_runtime_selection(agent_context, tool_call.arguments) if tool else None
             tool_event_id = str(uuid.uuid4())
             yield AgentEvent(
-                type="tool_execution_start", 
-                event_id=tool_event_id, 
-                parent_id=turn_event_id, 
-                data={"tool_call": tool_call}
+                type="tool_execution_start",
+                event_id=tool_event_id,
+                parent_id=turn_event_id,
+                data={
+                    "tool_call": tool_call,
+                    "reads": getattr(tool, "reads", []),
+                    "writes": getattr(tool, "writes", []),
+                    "temp_outputs": getattr(tool, "temp_outputs", []),
+                    "runtime_selection": runtime_selection.to_payload() if runtime_selection else None,
+                },
             )
-            
-            tool = next((t for t in tools if t.name == tool_call.name), None)
-            
+
             if not tool:
                 error_msg = f"Error: Tool {tool_call.name} not found."
-                context_messages.append(ToolResultMessage(
+                tool_result_message = ToolResultMessage(
                     tool_call_id=tool_call.id,
                     name=tool_call.name,
-                    content=error_msg
-                ))
+                    content=error_msg,
+                    is_error=True,
+                )
+                context_messages.append(tool_result_message)
+                agent_context.messages = context_messages
+                tool_results.append(tool_result_message)
                 consecutive_failures += 1
+                yield AgentEvent(type="message_start", parent_id=tool_event_id, data={"message": tool_result_message})
+                yield AgentEvent(type="message_end", parent_id=tool_event_id, data={"message": tool_result_message})
                 yield AgentEvent(type="tool_execution_error", parent_id=tool_event_id, data={"error": error_msg})
             else:
                 try:
-                    # Execute tool with context and capture delta
-                    result = await tool.execute(tool_call.id, tool_call.arguments, agent_context)
-                    
-                    # Merge state delta safely if returned
-                    if getattr(result, "state_delta", None):
-                        # Use dict.update for direct key overwrites (shallow merge).
-                        # Future improvements can implement deep merge if dictated by design.
-                        agent_context.shared_memory.update(result.state_delta)
-                        
-                    context_messages.append(ToolResultMessage(
-                        tool_call_id=tool_call.id,
-                        name=tool_call.name,
-                        content=result.content
-                    ))
-                    # Reset failure count on successful execution
-                    consecutive_failures = 0
-                    yield AgentEvent(
-                        type="tool_execution_success", 
-                        parent_id=tool_event_id, 
-                        data={
-                            "result": result.content[:500],
-                            "delta_applied": bool(getattr(result, "state_delta", None))
-                        }
+                    execution = await execute_tool_with_streaming_updates(
+                        tool,
+                        tool_call,
+                        agent_context,
+                        abort_signal,
+                        tool_event_id,
+                        runtime_selection=runtime_selection,
                     )
-                except Exception as e:
-                    error_msg = f"Error executing tool {tool_call.name}: {str(e)}"
-                    context_messages.append(ToolResultMessage(
+                    for event in execution.events:
+                        yield event
+
+                    result = execution.result
+                    batch_runtime_ops.extend(execution.staged_runtime_ops)
+                    batch_runtime_ops.extend(collect_tool_result_runtime_ops(tool.name, result))
+
+                    result_blocks = (
+                        list(result.content_blocks) if result.content_blocks else content_blocks_from_text(result.content)
+                    )
+                    tool_result_message = ToolResultMessage(
                         tool_call_id=tool_call.id,
                         name=tool_call.name,
-                        content=error_msg
-                    ))
+                        content_blocks=result_blocks,
+                        raw_content=result.raw_content if result.raw_content is not None else None,
+                        details=result.details,
+                    )
+                    context_messages.append(tool_result_message)
+                    agent_context.messages = context_messages
+                    tool_results.append(tool_result_message)
+                    consecutive_failures = 0
+
+                    yield AgentEvent(type="message_start", parent_id=tool_event_id, data={"message": tool_result_message})
+                    yield AgentEvent(type="message_end", parent_id=tool_event_id, data={"message": tool_result_message})
+                    yield AgentEvent(
+                        type="tool_execution_success",
+                        parent_id=tool_event_id,
+                        data={
+                            "result": tool_result_message.content,
+                            "delta_staged": bool(execution.staged_runtime_ops or result.state_delta or result.runtime_ops),
+                            "runtime_revision": agent_context.runtime.revision,
+                        },
+                    )
+                    if abort_signal.is_cancelled:
+                        break
+                except Exception as error:
+                    error_msg = f"Error executing tool {tool_call.name}: {str(error)}"
+                    tool_result_message = ToolResultMessage(
+                        tool_call_id=tool_call.id,
+                        name=tool_call.name,
+                        content=error_msg,
+                        is_error=True,
+                    )
+                    context_messages.append(tool_result_message)
+                    agent_context.messages = context_messages
+                    tool_results.append(tool_result_message)
                     consecutive_failures += 1
+                    yield AgentEvent(type="message_start", parent_id=tool_event_id, data={"message": tool_result_message})
+                    yield AgentEvent(type="message_end", parent_id=tool_event_id, data={"message": tool_result_message})
                     yield AgentEvent(type="tool_execution_error", parent_id=tool_event_id, data={"error": error_msg})
-            
-            # 7. Steering Phase (Mid-Execution logging & non-blocking observation check)
-            # If user injects message mid tool-calling, stop remaining tools.
+                    if abort_signal.is_cancelled:
+                        break
+
             if hasattr(config, "get_steering_messages"):
                 steering = await config.get_steering_messages()
                 if steering:
                     context_messages.extend(steering)
+                    agent_context.messages = context_messages
                     steering_interrupted = True
                     yield AgentEvent(
-                        type="steering_interruption", 
-                        parent_id=turn_event_id, 
-                        data={"steering_messages": steering}
+                        type="steering_interruption",
+                        parent_id=turn_event_id,
+                        data={"steering_messages": steering},
                     )
-                    break # Abort remaining tools in this batch and return to LLM reasoning loop
-                    
-        yield AgentEvent(
-            type="turn_end", 
-            parent_id=turn_event_id, 
-            data={"message": assistant_msg, "tools_executed": len(assistant_msg.tool_calls), "interrupted": steering_interrupted}
+                    break
+
+            if abort_signal.is_cancelled:
+                break
+
+        if batch_runtime_ops:
+            commit_runtime_ops(agent_context, batch_runtime_ops)
+
+        runtime_message = await inject_runtime_snapshot(context_messages, agent_context, config)
+        async for event in emit_runtime_message_event(runtime_message, turn_event_id):
+            yield event
+
+        worklog_message = build_worklog_message(
+            list(assistant_msg.tool_calls),
+            batch_runtime_ops,
+            agent_context.runtime.revision,
         )
-        
+        context_messages.append(worklog_message)
+        agent_context.messages = context_messages
+        worklog_event_id = str(uuid.uuid4())
+        yield AgentEvent(
+            type="message_start",
+            event_id=worklog_event_id,
+            parent_id=turn_event_id,
+            data={"message": worklog_message},
+        )
+        yield AgentEvent(
+            type="message_end",
+            parent_id=worklog_event_id,
+            data={"message": worklog_message},
+        )
+
+        yield AgentEvent(
+            type="turn_end",
+            parent_id=turn_event_id,
+            data={
+                "message": assistant_msg,
+                "tools_executed": len(assistant_msg.tool_calls),
+                "interrupted": steering_interrupted,
+                "tool_results": tool_results,
+                "batch_runtime_ops": batch_runtime_ops,
+                "runtime_revision": agent_context.runtime.revision,
+            },
+        )
+
+        if abort_signal.is_cancelled:
+            yield AgentEvent(type="agent_end", parent_id=loop_event_id, data={"messages": context_messages})
+            return
+        if steering_interrupted:
+            continue
+
     yield AgentEvent(type="agent_end", parent_id=loop_event_id, data={"messages": context_messages})

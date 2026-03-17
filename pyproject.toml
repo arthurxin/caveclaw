@@ -1,7 +1,7 @@
 [project]
 name = "caveclaw"
 version = "0.1.0"
-description = "Add your description here"
+description = "A Python-first agent core for tool-using LLM workflows."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

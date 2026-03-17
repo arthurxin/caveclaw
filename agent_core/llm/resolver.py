@@ -134,8 +134,11 @@ class ModelResolver:
         # If complete failure, try to invent a fallback if provider prefix is known
         if not model and "/" in uri:
             provider, rest = uri.split("/", 1)
-            model_id = rest.split(":")[0] 
+            model_id = rest.split(":")[0]
+            suffix = rest.rsplit(":", 1)[1] if ":" in rest else None
             model = build_fallback_model(provider, model_id, self.registry.get_all())
+            if suffix and is_valid_thinking_level(suffix):
+                thinking_level = suffix
             
         return model, thinking_level
 

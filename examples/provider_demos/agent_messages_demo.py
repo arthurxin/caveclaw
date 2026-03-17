@@ -1,15 +1,15 @@
 """
-测试脚本：使用 AgentMessage (types.py Message 格式) 测试各 Provider 的流式输出。
+示例脚本：使用 AgentMessage (types.py Message 格式) 测试各 Provider 的流式输出。
 
 运行方式:
-    .venv/bin/python tests/test_agent_message.py
+    .venv/bin/python examples/provider_demos/agent_messages_demo.py
 """
 import asyncio
 import os
 import sys
 from dotenv import load_dotenv
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from agent_core.types import Message, AssistantMessage, AgentMessage
 from agent_core.llm.registry import ModelRegistry

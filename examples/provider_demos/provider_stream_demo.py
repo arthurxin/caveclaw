@@ -4,7 +4,7 @@ import sys
 from dotenv import load_dotenv
 
 # Add project root to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from agent_core.llm.registry import ModelRegistry
 from agent_core.llm.resolver import ModelResolver
