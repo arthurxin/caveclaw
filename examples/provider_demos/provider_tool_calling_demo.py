@@ -9,12 +9,11 @@ from typing import Any, Callable, Dict, List, Optional
 
 from dotenv import load_dotenv
 
-from agent_core.llm.api_registry import StreamOptions
-from agent_core.llm.message_codec import codec_for_provider
-from agent_core.llm.provider_types import Model
-from agent_core.llm.registry import ModelRegistry
-from agent_core.types import AgentTool, AssistantMessage, Message, ThinkingBlock, ToolCall, ToolResultMessage
-from agent_core.assistant_stream import append_assistant_delta
+from agent_core.assistant_messages import AgentTool, AssistantMessage, Message, ThinkingBlock, ToolCall, ToolResultMessage, append_assistant_delta
+from agent_core.llm_provider.api_registry import StreamOptions
+from agent_core.llm_provider.message_codec import codec_for_provider
+from agent_core.llm_provider.provider_types import Model
+from agent_core.llm_provider.registry import ModelRegistry
 from demo_shared import DOTENV_PATH, MODELS_JSON_PATH, build_provider
 
 

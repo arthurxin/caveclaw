@@ -6,16 +6,8 @@ from typing import Any, AsyncGenerator, Callable, List, Optional
 
 from dotenv import load_dotenv
 
-from .assistant_stream import stream_assistant_response
-from .compaction import compact_messages_for_llm
-from .runtime_projection import (
-    build_worklog_message,
-    commit_runtime_ops,
-    emit_runtime_message_event,
-    inject_runtime_snapshot,
-)
-from .tool_execution import collect_tool_result_runtime_ops, execute_tool_with_streaming_updates
-from .types import (
+from ..assistant_messages.assistant_stream import stream_assistant_response
+from ..assistant_messages.types import (
     AgentContext,
     AgentEvent,
     AgentLoopConfig,
@@ -25,10 +17,18 @@ from .types import (
     CancellationSignal,
     Message,
     RuntimeDeltaOp,
-    ToolResultMessage,
     RuntimeState,
+    ToolResultMessage,
     content_blocks_from_text,
 )
+from .compaction import compact_messages_for_llm
+from .runtime_projection import (
+    build_worklog_message,
+    commit_runtime_ops,
+    emit_runtime_message_event,
+    inject_runtime_snapshot,
+)
+from .tool_execution import collect_tool_result_runtime_ops, execute_tool_with_streaming_updates
 
 # Load environment variables
 load_dotenv()

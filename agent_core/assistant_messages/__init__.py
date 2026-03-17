@@ -1,4 +1,5 @@
-from .assistant_messages import (
+from .assistant_stream import append_assistant_delta, stream_assistant_response
+from .types import (
     AgentContext,
     AgentEvent,
     AgentLoopConfig,
@@ -29,16 +30,12 @@ from .assistant_messages import (
     ToolResultBlock,
     ToolResultMessage,
     ToolRuntimeSelection,
-    append_assistant_delta,
     content_blocks_from_text,
     content_blocks_to_text,
-    stream_assistant_response,
     text_block,
 )
-from .core import Agent, run_loop
 
 __all__ = [
-    "Agent",
     "AgentContext",
     "AgentEvent",
     "AgentLoopConfig",
@@ -72,7 +69,6 @@ __all__ = [
     "append_assistant_delta",
     "content_blocks_from_text",
     "content_blocks_to_text",
-    "run_loop",
     "stream_assistant_response",
     "text_block",
 ]

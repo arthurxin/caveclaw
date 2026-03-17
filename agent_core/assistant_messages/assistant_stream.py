@@ -110,14 +110,14 @@ async def stream_assistant_response(
     if stream_fn is not None:
         await consume_chunks(stream_fn(messages))
     else:
-        from .llm.api_registry import StreamOptions, api_provider_registry
-        from .llm.message_codec import codec_for_provider
+        from ..llm_provider.api_registry import StreamOptions, api_provider_registry
+        from ..llm_provider.message_codec import codec_for_provider
 
         model = getattr(config, "model", None)
         if model is None:
             raise ValueError(
                 "Neither `stream_fn` nor `config.model` was provided. "
-                "Please set config.model to an agent_core.llm.Model instance, "
+                "Please set config.model to an agent_core.llm_provider.Model instance, "
                 "or pass a `stream_fn` for legacy use."
             )
 

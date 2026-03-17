@@ -6,12 +6,12 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from agent_core.types import (
+from agent_core.assistant_messages import (
     AgentTool, ToolResult, AgentContext, AgentEvent, ToolCall, AssistantMessage, AgentLoopConfig,
     AgentMessage, Message, ToolResultMessage
 )
-from agent_core.agent_loop import run_loop
-from agent_core.inspector import PythonRuntimeInspector
+from agent_core.core import run_loop
+from agent_core.core.inspector import PythonRuntimeInspector
 
 
 # ==========================================

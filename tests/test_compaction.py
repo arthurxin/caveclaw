@@ -1,7 +1,7 @@
 import unittest
 
-from agent_core.compaction import compact_messages_for_llm
-from agent_core.types import AgentContext, Message, RuntimeSnapshotBlock, RuntimeSnapshotEntry, TextBlock
+from agent_core.assistant_messages import AgentContext, Message, RuntimeSnapshotBlock, RuntimeSnapshotEntry, TextBlock
+from agent_core.core.compaction import compact_messages_for_llm
 
 
 class CompactionConfig:

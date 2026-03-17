@@ -4,7 +4,15 @@ import asyncio
 from typing import AsyncGenerator, Callable, List, Optional
 
 from .agent_loop import run_loop
-from .types import AgentEvent, AgentLoopConfig, AgentMessage, AgentState, AgentTool, BasicCancellationSignal, RuntimeState
+from ..assistant_messages.types import (
+    AgentEvent,
+    AgentLoopConfig,
+    AgentMessage,
+    AgentState,
+    AgentTool,
+    BasicCancellationSignal,
+    RuntimeState,
+)
 
 
 class Agent:

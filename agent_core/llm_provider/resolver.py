@@ -1,4 +1,5 @@
 import fnmatch
+import os
 from typing import Optional, Tuple, List
 from dataclasses import dataclass
 from .provider_types import Model
@@ -150,6 +151,19 @@ class ModelResolver:
             model, think = self.resolve(cli_model_str)
             if model:
                 return model, think
+
+        env_default_provider = os.environ.get("CAVECLAW_DEFAULT_PROVIDER")
+        env_default_model = os.environ.get("CAVECLAW_DEFAULT_MODEL")
+        if env_default_provider or env_default_model:
+            provider = env_default_provider or default_provider
+            model_id = env_default_model or DEFAULT_MODEL_PER_PROVIDER.get(provider or "", default_model or "")
+            if provider and model_id:
+                found = self.registry.find(provider, model_id)
+                if found:
+                    return found, DEFAULT_THINKING_LEVEL
+                fallback = build_fallback_model(provider, model_id, self.registry.get_all())
+                if fallback:
+                    return fallback, DEFAULT_THINKING_LEVEL
                 
         # Try finding default
         if default_provider and default_model:

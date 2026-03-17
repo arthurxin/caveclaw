@@ -1,14 +1,13 @@
 import unittest
 
-from agent_core.assistant_stream import append_assistant_delta
-from agent_core.llm.api_registry import StreamOptions
-from agent_core.llm.message_codec import AnthropicMessageCodec, ArkMessageCodec, AzureMessageCodec, GoogleMessageCodec, MiniMaxMessageCodec
-from agent_core.llm.providers.google_provider import (
+from agent_core.assistant_messages import AssistantMessage, Message, ToolCall, ToolResultMessage, append_assistant_delta
+from agent_core.llm_provider.api_registry import StreamOptions
+from agent_core.llm_provider.message_codec import AnthropicMessageCodec, ArkMessageCodec, AzureMessageCodec, GoogleMessageCodec, MiniMaxMessageCodec
+from agent_core.llm_provider.providers.google_provider import (
     _convert_messages,
     _convert_schema_to_gemini,
     _extract_gemini_provider_state,
 )
-from agent_core.types import AssistantMessage, Message, ToolCall, ToolResultMessage
 
 
 class MessageCodecTests(unittest.TestCase):

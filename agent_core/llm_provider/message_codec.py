@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Protocol
 
-from agent_core.types import AgentMessage, AssistantMessage, Message, ToolResultMessage
+from agent_core.assistant_messages.types import AgentMessage, AssistantMessage, Message, ToolResultMessage
 
 from .api_registry import StreamOptions
 

@@ -2,9 +2,7 @@ import asyncio
 import unittest
 from typing import Any, Dict, List, Optional
 
-from agent_core.agent_loop import run_loop
-from agent_core.llm import Model, api_provider_registry
-from agent_core.types import (
+from agent_core.assistant_messages import (
     AgentContext,
     AgentMessage,
     AgentTool,
@@ -16,6 +14,8 @@ from agent_core.types import (
     TextBlock,
     ToolResult,
 )
+from agent_core.core import run_loop
+from agent_core.llm_provider import Model, api_provider_registry
 
 
 class RecordingTool(AgentTool):
@@ -289,7 +289,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         final_messages = []
         tool_start_payload = None
 
-        from agent_core.types import RuntimeState
+        from agent_core.assistant_messages import RuntimeState
 
         initial_runtime = RuntimeState()
         initial_runtime.set_variable("seed", "existing", llm_view=[TextBlock(text="seed variable")])

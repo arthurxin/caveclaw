@@ -6,10 +6,10 @@ from dotenv import load_dotenv
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from agent_core.llm.registry import ModelRegistry
-from agent_core.llm.resolver import ModelResolver
-from agent_core.llm.api_registry import api_provider_registry, StreamOptions
-from demo_shared import register_demo_providers
+from agent_core.llm_provider.api_registry import StreamOptions, api_provider_registry
+from agent_core.llm_provider.registry import ModelRegistry
+from agent_core.llm_provider.resolver import ModelResolver
+from demo_shared import default_demo_model_uri, register_demo_providers
 
 register_demo_providers()
 
@@ -84,8 +84,6 @@ async def test_streaming(model_uri: str):
 if __name__ == "__main__":
     load_dotenv()
     
-    # Default to Azure demo if configured, else fall back to minimax.
-    default_model = "azure/gpt-5.4" if os.environ.get("AZURE_API_KEY") else "minimax/minimax"
-    target_model = sys.argv[1] if len(sys.argv) > 1 else default_model
+    target_model = sys.argv[1] if len(sys.argv) > 1 else default_demo_model_uri()
     
     asyncio.run(test_streaming(target_model))

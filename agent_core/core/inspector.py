@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from typing import Any, Dict, List, Optional, Union
 
-from .types import (
+from ..assistant_messages.types import (
     AgentContext,
     ContentBlock,
     EnvironmentInspector,

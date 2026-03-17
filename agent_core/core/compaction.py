@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional
 
-from .types import (
+from ..assistant_messages.types import (
     AgentContext,
     AgentLoopConfig,
     AgentMessage,

@@ -2,7 +2,7 @@ from typing import Protocol, AsyncGenerator, Dict, Any, List, Optional
 from .provider_types import Model
 
 # Importing engine types directly to interface with them
-from agent_core.types import AgentMessage, Message, AgentTool
+from agent_core.assistant_messages.types import AgentMessage, AgentTool, Message
 
 class StreamOptions:
     """Options for generating a response stream."""

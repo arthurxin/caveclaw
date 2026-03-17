@@ -1,8 +1,8 @@
 import unittest
 
 from agent_core import Agent, Message
-from agent_core.llm import Model, api_provider_registry
-from agent_core.types import AgentContext, AgentTool, RuntimeState, ToolResult
+from agent_core.assistant_messages import AgentContext, AgentTool, RuntimeState, ToolResult
+from agent_core.llm_provider import Model, api_provider_registry
 
 
 class FakeProvider:

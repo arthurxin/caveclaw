@@ -1,8 +1,7 @@
 import unittest
 
-from agent_core.assistant_stream import stream_assistant_response
-from agent_core.llm.providers.minimax_provider import MiniMaxProvider
-from agent_core.types import Message, ThinkingBlock
+from agent_core.assistant_messages import Message, ThinkingBlock, stream_assistant_response
+from agent_core.llm_provider.providers.minimax_provider import MiniMaxProvider
 
 
 class DummyConfig:

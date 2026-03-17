@@ -9,8 +9,8 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from agent_core.llm import ModelRegistry, ModelResolver, api_provider_registry, StreamOptions
-from agent_core.types import AgentTool, ToolResult, AgentContext
+from agent_core.assistant_messages import AgentContext, AgentTool, ToolResult
+from agent_core.llm_provider import ModelRegistry, ModelResolver, StreamOptions, api_provider_registry
 from demo_shared import MODELS_JSON_PATH, register_demo_providers
 
 register_demo_providers()

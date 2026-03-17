@@ -11,11 +11,11 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from agent_core.types import Message, AssistantMessage, AgentMessage
-from agent_core.llm.registry import ModelRegistry
-from agent_core.llm.resolver import ModelResolver
-from agent_core.llm.api_registry import api_provider_registry, StreamOptions
-from demo_shared import register_demo_providers
+from agent_core.assistant_messages import AgentMessage, AssistantMessage, Message
+from agent_core.llm_provider.api_registry import StreamOptions, api_provider_registry
+from agent_core.llm_provider.registry import ModelRegistry
+from agent_core.llm_provider.resolver import ModelResolver
+from demo_shared import default_demo_model_uri, register_demo_providers
 
 register_demo_providers()
 
@@ -99,18 +99,17 @@ async def main():
     load_dotenv()
 
     targets = [
+        default_demo_model_uri(),
         "google/gemini-3.1-pro-preview",
         "minimax/minimax",
     ]
-
-    if os.environ.get("AZURE_API_KEY"):
-        targets.insert(0, "azure/gpt-5.4")
+    deduped_targets = list(dict.fromkeys(targets))
 
     # 如果 .env 里有 ARK_API_KEY，就测一下
     if os.environ.get("ARK_API_KEY"):
-        targets.append("volcengine/ep-xxxxxxxx-xxxxx")  # 替换为实际 endpoint ID
+        deduped_targets.append("volcengine/ep-xxxxxxxx-xxxxx")  # 替换为实际 endpoint ID
 
-    for model_uri in targets:
+    for model_uri in deduped_targets:
         await test_with_agent_messages(model_uri)
 
     print(f"\n{'='*50}")

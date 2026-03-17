@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, AsyncGenerator, List, Optional
 
-from .types import (
+from ..assistant_messages.types import (
     AgentContext,
     AgentEvent,
     AgentLoopConfig,

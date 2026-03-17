@@ -1,7 +1,8 @@
 import os
 import unittest
+from unittest.mock import patch
 
-from agent_core.llm import ModelRegistry, ModelResolver
+from agent_core.llm_provider import ModelRegistry, ModelResolver
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -30,10 +31,28 @@ class ModelResolverTests(unittest.TestCase):
         self.assertEqual(thinking, "low")
 
     def test_find_initial_model_uses_current_openai_default(self):
-        model, thinking = self.resolver.find_initial_model(cli_model_str=None)
+        with patch.dict(
+            os.environ,
+            {"CAVECLAW_DEFAULT_PROVIDER": "", "CAVECLAW_DEFAULT_MODEL": ""},
+            clear=False,
+        ):
+            model, thinking = self.resolver.find_initial_model(cli_model_str=None)
 
         self.assertIsNotNone(model)
         self.assertEqual(model.provider, "openai")
+        self.assertEqual(model.id, "gpt-5.4")
+        self.assertEqual(thinking, "off")
+
+    def test_find_initial_model_can_read_default_provider_from_env(self):
+        with patch.dict(
+            os.environ,
+            {"CAVECLAW_DEFAULT_PROVIDER": "azure", "CAVECLAW_DEFAULT_MODEL": "gpt-5.4"},
+            clear=False,
+        ):
+            model, thinking = self.resolver.find_initial_model(cli_model_str=None)
+
+        self.assertIsNotNone(model)
+        self.assertEqual(model.provider, "azure")
         self.assertEqual(model.id, "gpt-5.4")
         self.assertEqual(thinking, "off")
 

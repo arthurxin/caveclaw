@@ -16,6 +16,8 @@
 - [x] 完成 Azure provider 的真实 tool-calling smoke test。
 - [x] 将 demo 共享的 provider 注册 / provider 构造逻辑抽到 `examples/provider_demos/demo_shared.py`。
 - [x] 将 resolver 默认模型更新为当前配置一致的 `openai/gpt-5.4`。
+- [x] 将 `agent_core` 重组为 `core / assistant_messages / llm_provider` 三层目录，并为每层补上 README。
+- [x] 支持通过 `.env` 中的 `CAVECLAW_DEFAULT_PROVIDER / CAVECLAW_DEFAULT_MODEL` 选择默认 provider。
 
 ## 当前优先级
 
@@ -58,6 +60,8 @@
 - [x] 为 Azure provider 建立 codec / replay / continuation 基础路径。
 - [ ] 给 `ModelRegistry` 增加更清楚的加载错误与配置校验。
 - [ ] 给 Azure Responses provider 补 usage、streaming 增量和 provider_state 精细化映射。
+- [ ] 继续把 `assistant_messages/types.py` 拆成更细的子模块：
+  例如 content blocks、runtime types、tool/result types、event/config types。
 
 ### P2: 暂时只记 TODO，不急着实现
 

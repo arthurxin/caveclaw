@@ -1,14 +1,14 @@
 import unittest
 
-from agent_core.llm.api_registry import StreamOptions
-from agent_core.llm.message_codec import AzureMessageCodec
-from agent_core.llm.provider_types import Model
-from agent_core.llm.providers.azure_provider import (
+from agent_core.assistant_messages import AssistantMessage, ToolCall, ToolResultMessage
+from agent_core.llm_provider.api_registry import StreamOptions
+from agent_core.llm_provider.message_codec import AzureMessageCodec
+from agent_core.llm_provider.provider_types import Model
+from agent_core.llm_provider.providers.azure_provider import (
     _build_azure_payload,
     _find_previous_response_context,
     _parse_azure_response,
 )
-from agent_core.types import AssistantMessage, ToolCall, ToolResultMessage
 
 
 class AzureProviderTests(unittest.TestCase):

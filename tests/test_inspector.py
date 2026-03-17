@@ -1,7 +1,7 @@
 import unittest
 
-from agent_core.inspector import PythonRuntimeInspector
-from agent_core.types import AgentContext, RuntimeSnapshotBlock, TextBlock
+from agent_core.assistant_messages import AgentContext, RuntimeSnapshotBlock, TextBlock
+from agent_core.core.inspector import PythonRuntimeInspector
 
 
 class InspectorTests(unittest.IsolatedAsyncioTestCase):

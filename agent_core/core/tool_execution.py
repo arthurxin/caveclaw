@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from .types import (
+from ..assistant_messages.types import (
     AgentContext,
     AgentEvent,
     AgentTool,
