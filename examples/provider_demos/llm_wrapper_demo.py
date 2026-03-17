@@ -10,24 +10,22 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from agent_core.llm import ModelRegistry, ModelResolver, api_provider_registry, StreamOptions
-from agent_core.llm.providers import OpenAiProvider, AnthropicProvider
 from agent_core.types import AgentTool, ToolResult, AgentContext
+from demo_shared import MODELS_JSON_PATH, register_demo_providers
 
-# 1. Register providers at startup
-api_provider_registry.register(OpenAiProvider())
-api_provider_registry.register(AnthropicProvider())
+register_demo_providers()
 
 # 2. Load models from models.json (or use the builtin fallback)
 #    If models.json doesn't exist, the registry still works — providers
 #    are just resolved by env var convention (OPENAI_API_KEY, etc.)
-registry = ModelRegistry(models_json_path="models.json")
+registry = ModelRegistry(models_json_path=MODELS_JSON_PATH)
 resolver = ModelResolver(registry)
 
 async def run_example():
     # 3. Resolve a model by name + optional thinking level
-    #    Supports: "gpt-4o", "anthropic/claude-opus-4-6:high", "openai/gpt-4o"
+    #    Supports: "gpt-5.4", "anthropic/claude-4-6-sonnet-20241022:high", "azure/gpt-5.4"
     model, thinking_level = resolver.find_initial_model(
-        cli_model_str="gpt-4o",  # or: "anthropic/claude-3-5-sonnet"
+        cli_model_str="gpt-5.4",
     )
     assert model is not None, "No model found! Check your models.json or env vars."
     print(f"Using model: {model.provider}/{model.id}  (thinking: {thinking_level})")

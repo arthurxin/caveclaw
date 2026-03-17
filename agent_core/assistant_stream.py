@@ -75,6 +75,7 @@ async def stream_assistant_response(
     assistant_message = AssistantMessage(content_blocks=[], raw_content="")
     message_event_id = str(uuid.uuid4())
     active_signal = signal or BasicCancellationSignal()
+    message_codec = None
 
     if yield_event:
         yield_event(
@@ -91,13 +92,18 @@ async def stream_assistant_response(
             if active_signal.is_cancelled:
                 assistant_message.stop_reason = "aborted"
                 break
-            append_assistant_delta(assistant_message, chunk)
+            normalized_chunk = (
+                message_codec.from_provider_chunk(chunk, assistant_message)
+                if message_codec is not None
+                else chunk
+            )
+            append_assistant_delta(assistant_message, normalized_chunk)
             if yield_event:
                 yield_event(
                     AgentEvent(
                         type="message_update",
                         parent_id=message_event_id,
-                        data={"message": assistant_message, "delta": chunk},
+                        data={"message": assistant_message, "delta": normalized_chunk},
                     )
                 )
 
@@ -141,6 +147,9 @@ async def stream_assistant_response(
 
     if assistant_message.stop_reason is None:
         assistant_message.stop_reason = "tool_use" if assistant_message.tool_calls else "stop"
+
+    if message_codec is not None:
+        message_codec.finalize_assistant_message(assistant_message)
 
     if yield_event:
         yield_event(

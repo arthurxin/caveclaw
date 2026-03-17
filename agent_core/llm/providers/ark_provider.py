@@ -17,6 +17,7 @@ from typing import AsyncGenerator, Dict, Any, List, Optional
 
 from ..provider_types import Model
 from ..api_registry import StreamOptions
+from ..message_codec import ArkMessageCodec
 
 ARK_DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 
@@ -32,6 +33,7 @@ class ArkProvider:
       3. default: https://ark.cn-beijing.volces.com/api/v3
     """
     api = "ark"
+    message_codec = ArkMessageCodec()
 
     async def stream(
         self,

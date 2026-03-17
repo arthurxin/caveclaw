@@ -115,11 +115,92 @@ caveclaw/
 4. 根据需要编辑 `models.json`。
 5. 先看 `examples/` 再接入自己的上层应用。
 
+## 默认模型
+
+目前框架层的默认初始模型是：
+
+- `openai/gpt-5.4`
+
+这是 `ModelResolver.find_initial_model()` 的默认值，也是当前 `models.json` 中与 resolver 对齐的主默认模型。
+
+另外，示例脚本会做一点更贴近本地环境的选择：
+
+- `provider_stream_demo.py`
+  如果检测到 `AZURE_API_KEY`，会优先默认使用 `azure/gpt-5.4`。
+- 其他 resolver / registry 主路径
+  仍以 `openai/gpt-5.4` 作为框架默认入口。
+
 示例入口：
 
 - `examples/engine_demos/agent_scenarios_demo.py`
 - `examples/provider_demos/provider_stream_demo.py`
 - `examples/provider_demos/agent_messages_demo.py`
+- `examples/provider_demos/provider_tool_calling_demo.py`
+
+## Azure Provider
+
+仓库现在已经内置了一个基于 Azure OpenAI Responses API 的 `azure` provider：
+
+- provider 名称：`azure`
+- api 类型：`azure-responses`
+- 默认模型：`gpt-5.4`
+- 默认 endpoint：`https://xinhongyu-resource.openai.azure.com/openai/v1/responses`
+
+它当前支持的能力包括：
+
+- `instructions + input` 形式的首轮请求构造
+- reasoning effort 映射
+- 原生 Responses API function calling
+- `previous_response_id` 续轮
+- `function_call_output` 工具结果回传
+
+### Azure 环境变量
+
+最少需要：
+
+- `AZURE_API_KEY`
+
+可选：
+
+- `AZURE_BASE_URL`
+  如果不填，则使用 `models.json` 中的默认 endpoint。
+- `AZURE_AUTH_MODE`
+  可选 `bearer` 或 `api-key`。
+  默认是 `bearer`，因为你当前给的是这种认证方式。
+- `AZURE_MODEL_ID`
+  用于覆盖默认 `gpt-5.4`。
+
+### Azure 测试方式
+
+真实 provider tool calling 烟雾测试：
+
+```bash
+PYTHONPATH=/Users/arthurxing/Desktop/project/github/caveclaw \
+.venv/bin/python examples/provider_demos/provider_tool_calling_demo.py --providers azure
+```
+
+普通流式输出测试：
+
+```bash
+.venv/bin/python examples/provider_demos/provider_stream_demo.py azure/gpt-5.4
+```
+
+基于 `AgentMessage` 的 provider 测试：
+
+```bash
+.venv/bin/python examples/provider_demos/agent_messages_demo.py
+```
+
+目前 Azure provider 已经通过本地单测，以及真实 Azure endpoint 的多轮 tool calling smoke test。
+
+## 代码整理补充
+
+这轮除了 provider 和 runtime 的内核改动，也顺手做了两类结构整理：
+
+- `examples/provider_demos/demo_shared.py`
+  抽出了 demo 共享的 provider 注册、provider 构造、项目路径常量，减少多个示例脚本里的重复样板代码。
+- `agent_core/llm/providers/`
+  现在明确承载 provider 适配器；`AzureProvider` 已放在这一层，与 `GoogleProvider / MiniMaxProvider / ArkProvider` 并列。
 
 ## 当前建议的开发顺序
 

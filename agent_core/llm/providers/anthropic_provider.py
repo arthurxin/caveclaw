@@ -14,6 +14,7 @@ from typing import AsyncGenerator, Dict, Any, List, Optional
 
 from ..provider_types import Model
 from ..api_registry import StreamOptions
+from ..message_codec import AnthropicMessageCodec
 
 
 class AnthropicProvider:
@@ -26,6 +27,7 @@ class AnthropicProvider:
     - amazon-bedrock (via boto3 with Anthropic models, handled separately)
     """
     api = "anthropic-messages"
+    message_codec = AnthropicMessageCodec()
 
     async def stream(
         self,

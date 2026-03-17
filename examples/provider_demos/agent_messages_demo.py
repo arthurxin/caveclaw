@@ -15,17 +15,9 @@ from agent_core.types import Message, AssistantMessage, AgentMessage
 from agent_core.llm.registry import ModelRegistry
 from agent_core.llm.resolver import ModelResolver
 from agent_core.llm.api_registry import api_provider_registry, StreamOptions
-from agent_core.llm.providers import (
-    OpenAiProvider, AnthropicProvider, GoogleProvider,
-    MiniMaxProvider, ArkProvider
-)
+from demo_shared import register_demo_providers
 
-# 注册所有 Provider
-api_provider_registry.register(OpenAiProvider())
-api_provider_registry.register(AnthropicProvider())
-api_provider_registry.register(GoogleProvider())
-api_provider_registry.register(MiniMaxProvider())
-api_provider_registry.register(ArkProvider())
+register_demo_providers()
 
 
 async def test_with_agent_messages(model_uri: str):
@@ -107,10 +99,12 @@ async def main():
     load_dotenv()
 
     targets = [
-        "google/gemini-pro-latest",
+        "google/gemini-3.1-pro-preview",
         "minimax/minimax",
-        # ARK 需要真实 endpoint ID，跳过占位符
     ]
+
+    if os.environ.get("AZURE_API_KEY"):
+        targets.insert(0, "azure/gpt-5.4")
 
     # 如果 .env 里有 ARK_API_KEY，就测一下
     if os.environ.get("ARK_API_KEY"):

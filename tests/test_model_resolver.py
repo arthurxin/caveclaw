@@ -29,6 +29,14 @@ class ModelResolverTests(unittest.TestCase):
         self.assertEqual(model.id, "custom-model")
         self.assertEqual(thinking, "low")
 
+    def test_find_initial_model_uses_current_openai_default(self):
+        model, thinking = self.resolver.find_initial_model(cli_model_str=None)
+
+        self.assertIsNotNone(model)
+        self.assertEqual(model.provider, "openai")
+        self.assertEqual(model.id, "gpt-5.4")
+        self.assertEqual(thinking, "off")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,11 @@
 - [x] 为工具执行链路补上 `tool_execution_update`、`signal` 接口位和 `runtime_ops` 入口。
 - [x] 为 `Agent` 补上基础控制面：`continue_run()`、队列模式、`wait_for_idle()`。
 - [x] 为 `max_rounds` 场景补上轻量级 `handle_consolidation()` hook。
+- [x] 补齐 Azure OpenAI Responses provider：
+  支持 `instructions + input`、reasoning effort、原生 function calling、`previous_response_id` 续轮和 `function_call_output` 回传。
+- [x] 完成 Azure provider 的真实 tool-calling smoke test。
+- [x] 将 demo 共享的 provider 注册 / provider 构造逻辑抽到 `examples/provider_demos/demo_shared.py`。
+- [x] 将 resolver 默认模型更新为当前配置一致的 `openai/gpt-5.4`。
 
 ## 当前优先级
 
@@ -48,7 +53,11 @@
   runtime 在 `AgentMessage` 之上，provider 在 `AgentMessage` 之下，统一层仍然是 `AgentMessage`。
 - [x] 引入 provider codec 基础层：
   让 `raw_content / provider_state` 的解释权逐步下沉到 provider 适配层，而不是继续堆在 loop 里。
+- [x] 为 Gemini provider 补齐 `thoughtSignature` replay 和连续 tool result 合并逻辑。
+- [x] 为 Volcengine provider 修复 tool call replay 的 arguments 字符串化问题。
+- [x] 为 Azure provider 建立 codec / replay / continuation 基础路径。
 - [ ] 给 `ModelRegistry` 增加更清楚的加载错误与配置校验。
+- [ ] 给 Azure Responses provider 补 usage、streaming 增量和 provider_state 精细化映射。
 
 ### P2: 暂时只记 TODO，不急着实现
 

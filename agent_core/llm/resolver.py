@@ -21,9 +21,12 @@ class ParsedModelResult:
 # Fallback IDs mapped to default providers.
 DEFAULT_MODEL_PER_PROVIDER = {
     "amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
-    "anthropic": "claude-opus-4-6",
+    "anthropic": "claude-4-6-sonnet-20241022",
     "openai": "gpt-5.4",
-    "google": "gemini-2.5-pro",
+    "google": "gemini-3.1-pro-preview",
+    "azure": "gpt-5.4",
+    "minimax": "minimax",
+    "volcengine": "doubao-seed-2-0-lite-260215",
     "xai": "grok-4-fast-non-reasoning",
     "deepseek": "deepseek-coder",
 }
@@ -142,7 +145,7 @@ class ModelResolver:
             
         return model, thinking_level
 
-    def find_initial_model(self, cli_model_str: Optional[str], default_provider: Optional[str] = "openai", default_model: Optional[str] = "gpt-4o") -> Tuple[Optional[Model], str]:
+    def find_initial_model(self, cli_model_str: Optional[str], default_provider: Optional[str] = "openai", default_model: Optional[str] = "gpt-5.4") -> Tuple[Optional[Model], str]:
         if cli_model_str:
             model, think = self.resolve(cli_model_str)
             if model:

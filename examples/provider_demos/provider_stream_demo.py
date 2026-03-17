@@ -9,14 +9,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from agent_core.llm.registry import ModelRegistry
 from agent_core.llm.resolver import ModelResolver
 from agent_core.llm.api_registry import api_provider_registry, StreamOptions
-from agent_core.llm.providers import OpenAiProvider, AnthropicProvider, GoogleProvider, MiniMaxProvider, ArkProvider
+from demo_shared import register_demo_providers
 
-# Register providers
-api_provider_registry.register(OpenAiProvider())
-api_provider_registry.register(AnthropicProvider())
-api_provider_registry.register(GoogleProvider())
-api_provider_registry.register(MiniMaxProvider())
-api_provider_registry.register(ArkProvider())
+register_demo_providers()
 
 async def test_streaming(model_uri: str):
     print(f"\n--- Testing Model: {model_uri} ---")
@@ -89,7 +84,8 @@ async def test_streaming(model_uri: str):
 if __name__ == "__main__":
     load_dotenv()
     
-    # Default to minimax for the user
-    target_model = sys.argv[1] if len(sys.argv) > 1 else "minimax/abab6.5s-chat"
+    # Default to Azure demo if configured, else fall back to minimax.
+    default_model = "azure/gpt-5.4" if os.environ.get("AZURE_API_KEY") else "minimax/minimax"
+    target_model = sys.argv[1] if len(sys.argv) > 1 else default_model
     
     asyncio.run(test_streaming(target_model))

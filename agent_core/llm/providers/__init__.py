@@ -8,5 +8,6 @@ from .anthropic_provider import AnthropicProvider
 from .google_provider import GoogleProvider
 from .minimax_provider import MiniMaxProvider
 from .ark_provider import ArkProvider
+from .azure_provider import AzureProvider
 
-__all__ = ["OpenAiProvider", "AnthropicProvider", "GoogleProvider", "MiniMaxProvider", "ArkProvider"]
+__all__ = ["OpenAiProvider", "AnthropicProvider", "GoogleProvider", "MiniMaxProvider", "ArkProvider", "AzureProvider"]
