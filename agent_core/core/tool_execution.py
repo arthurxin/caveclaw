@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from ..llm_provider.validation import validate_tool_arguments
 from ..assistant_messages.types import (
     AgentContext,
     AgentEvent,
@@ -65,6 +66,7 @@ async def invoke_tool_execute(
     execute = tool.execute
     signature = inspect.signature(execute)
     kwargs: Dict[str, Any] = {}
+    validated_params = validate_tool_arguments(tool, tool_call.arguments)
     runtime_selection = runtime_selection or tool.resolve_runtime_selection(agent_context, tool_call.arguments)
     previous_selection = agent_context.active_tool_selection
     agent_context.active_tool_selection = runtime_selection
@@ -73,7 +75,7 @@ async def invoke_tool_execute(
     if "signal" in signature.parameters:
         kwargs["signal"] = signal
     try:
-        return await execute(tool_call.id, tool_call.arguments, agent_context, **kwargs)
+        return await execute(tool_call.id, validated_params, agent_context, **kwargs)
     finally:
         agent_context.active_tool_selection = previous_selection
 
@@ -111,7 +113,13 @@ async def execute_tool_with_streaming_updates(
                     type="tool_execution_update",
                     event_id=tool_update_event_id,
                     parent_id=tool_event_id,
-                    data={"tool_call": tool_call, "partial_result": update},
+                    data={
+                        "tool_call": tool_call,
+                        "tool_call_id": tool_call.id,
+                        "tool_name": tool_call.name,
+                        "args": dict(tool_call.arguments),
+                        "partial_result": update,
+                    },
                 )
             )
 

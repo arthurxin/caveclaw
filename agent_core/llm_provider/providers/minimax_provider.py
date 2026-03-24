@@ -12,14 +12,27 @@ Key differences from standard OpenAI:
     MINIMAX_API_KEY=sk-xxxxx
     MINIMAX_BASE_URL=https://oneapi.hkgai.net/v1
 """
-import os
 import re
-import json
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from ..provider_types import Model
-from ..api_registry import StreamOptions
+from ..api_registry import StreamOptions, merge_request_headers, maybe_override_payload, resolve_effective_max_tokens
+from ..compat import (
+    build_openai_compatible_tools,
+    build_reasoning_payload,
+    normalize_openai_compatible_messages,
+    resolve_max_tokens_field,
+    supports_usage_in_streaming,
+)
 from ..message_codec import MiniMaxMessageCodec
+from ..normalized_chunks import (
+    normalize_usage_payload,
+    parse_json_arguments,
+    raw_content_chunk,
+    reasoning_chunk,
+    tool_calls_chunk,
+    usage_chunk,
+)
 
 
 class MiniMaxProvider:
@@ -55,10 +68,7 @@ class MiniMaxProvider:
         assembled: List[Dict[str, Any]] = []
         for idx in sorted(tool_call_accum.keys()):
             tool_call = tool_call_accum[idx]
-            try:
-                arguments = json.loads(tool_call["arguments"]) if tool_call["arguments"] else {}
-            except json.JSONDecodeError:
-                arguments = {"raw": tool_call["arguments"]}
+            arguments = parse_json_arguments(tool_call["arguments"])
             assembled.append(
                 {
                     "id": tool_call["id"],
@@ -80,41 +90,40 @@ class MiniMaxProvider:
         except ImportError:
             raise ImportError("openai package is required: uv add openai")
 
-        key = api_key or os.environ.get("MINIMAX_API_KEY", "EMPTY")
+        key = api_key or "EMPTY"
         base_url = (
             model.baseUrl
-            or os.environ.get("MINIMAX_BASE_URL")
             or "http://localhost:8080/v1"
         )
+        default_headers = merge_request_headers(model, options) or None
 
-        client = AsyncOpenAI(api_key=key, base_url=base_url)
+        client = AsyncOpenAI(api_key=key, base_url=base_url, default_headers=default_headers)
 
-        # Build tools payload (OpenAI format, same as OpenAiProvider)
-        openai_tools = None
-        if options.tools:
-            openai_tools = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    },
-                }
-                for t in options.tools
-            ]
+        provider_messages = normalize_openai_compatible_messages(model, messages)
+
+        openai_tools = build_openai_compatible_tools(model, options.tools)
 
         kwargs: Dict[str, Any] = dict(
             model=model.id,
-            messages=messages,
+            messages=provider_messages,
             extra_body={"reasoning_split": True},  # Enables <think>...</think> wrapping
-            temperature=0.6,
+            temperature=options.temperature if options.temperature is not None else 0.6,
             top_p=0.7,
-            max_tokens=model.maxTokens,
         )
+        kwargs[resolve_max_tokens_field(model)] = resolve_effective_max_tokens(model, options)
+        if supports_usage_in_streaming(model):
+            kwargs["stream_options"] = {"include_usage": True}
+        kwargs.update(build_reasoning_payload(model, options.thinking_level))
         if openai_tools:
             kwargs["tools"] = openai_tools
             kwargs["tool_choice"] = "auto"
+        if options.metadata:
+            kwargs["metadata"] = dict(options.metadata)
+        if options.session_id:
+            metadata = dict(kwargs.get("metadata") or {})
+            metadata.setdefault("session_id", options.session_id)
+            kwargs["metadata"] = metadata
+        kwargs = dict(await maybe_override_payload(kwargs, model, options))
 
         # Accumulators
         tool_call_accum: Dict[int, Dict[str, Any]] = {}
@@ -123,6 +132,15 @@ class MiniMaxProvider:
         # Use standard create(stream=True) to get raw SSE chunks
         stream_resp = await client.chat.completions.create(**kwargs, stream=True)
         async for chunk in stream_resp:
+            if getattr(chunk, "usage", None):
+                usage = normalize_usage_payload(
+                    input_tokens=getattr(chunk.usage, "prompt_tokens", None),
+                    output_tokens=getattr(chunk.usage, "completion_tokens", None),
+                    total_tokens=getattr(chunk.usage, "total_tokens", None),
+                )
+                if usage:
+                    yield usage_chunk(usage)
+
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta is None:
                 continue
@@ -153,11 +171,11 @@ class MiniMaxProvider:
         if content_buffer:
             parsed_content = self._extract_reasoning_and_content(content_buffer)
             if parsed_content["reasoning"]:
-                yield {"reasoning": parsed_content["reasoning"]}
-            yield {
-                "raw_content": parsed_content["raw_content"],
-                "content": parsed_content["content"],
-            }
+                yield reasoning_chunk(parsed_content["reasoning"])
+            yield raw_content_chunk(
+                parsed_content["raw_content"],
+                content=parsed_content["content"],
+            )
         # Emit assembled tool_calls if any
         if tool_call_accum:
-            yield {"tool_calls": self._assemble_tool_calls(tool_call_accum)}
+            yield tool_calls_chunk(self._assemble_tool_calls(tool_call_accum))

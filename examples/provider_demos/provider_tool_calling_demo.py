@@ -124,14 +124,16 @@ async def call_provider_once(
     options.tools = tools
 
     codec = codec_for_provider(provider)
-    provider_messages = codec.to_provider_messages(messages, options)
+    provider_messages = codec.encode_messages(messages, options)
     async for chunk in provider.stream(model, provider_messages, options, api_key=api_key):
-        append_assistant_delta(assistant_message, chunk)
+        append_assistant_delta(assistant_message, codec.decode_chunk(chunk, assistant_message))
 
     if assistant_message.raw_content == "":
         assistant_message.raw_content = None
     if assistant_message.stop_reason is None:
         assistant_message.stop_reason = "tool_use" if assistant_message.tool_calls else "stop"
+    codec.finalize_provider_state(assistant_message)
+    codec.finalize_assistant_message(assistant_message)
     return assistant_message
 
 

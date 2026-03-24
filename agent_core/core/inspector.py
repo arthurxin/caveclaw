@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 from typing import Any, Dict, List, Optional, Union
 
 from ..assistant_messages.types import (
@@ -16,25 +15,80 @@ from ..assistant_messages.types import (
 )
 
 
+def _is_pandas_dataframe(value: Any) -> bool:
+    type_repr = str(type(value))
+    if type_repr == "<class 'pandas.core.frame.DataFrame'>":
+        return True
+    return (
+        hasattr(value, "columns")
+        and hasattr(value, "dtypes")
+        and hasattr(value, "head")
+        and hasattr(value, "shape")
+        and hasattr(value, "to_json")
+    )
+
+
+def _is_pandas_series(value: Any) -> bool:
+    type_repr = str(type(value))
+    if type_repr == "<class 'pandas.core.series.Series'>":
+        return True
+    return (
+        hasattr(value, "index")
+        and hasattr(value, "dtype")
+        and hasattr(value, "head")
+        and hasattr(value, "to_dict")
+        and not hasattr(value, "columns")
+    )
+
+
 class DataFrameReducer(StateReducer):
     """Summarize a DataFrame without forcing pandas as a hard dependency."""
 
     def reduce(self, obj: Any) -> Union[str, List[ContentBlock]]:
-        if "pandas" in sys.modules and str(type(obj)) == "<class 'pandas.core.frame.DataFrame'>":
+        if _is_pandas_dataframe(obj):
             try:
                 shape = obj.shape
                 cols = list(obj.columns)
                 head_str = obj.head(3).to_string()
-                memory_usage = obj.memory_usage(deep=True).sum() / (1024 * 1024)
+                memory_usage = None
+                if hasattr(obj, "memory_usage"):
+                    memory_usage = obj.memory_usage(deep=True).sum() / (1024 * 1024)
+
+                memory_line = ""
+                if memory_usage is not None:
+                    memory_line = f"  - Memory: ~{memory_usage:.2f} MB\n"
                 return (
                     f"DataFrame:\n"
                     f"  - Shape: {shape[0]} rows x {shape[1]} cols\n"
-                    f"  - Memory: ~{memory_usage:.2f} MB\n"
+                    f"{memory_line}"
                     f"  - Columns: {cols}\n"
                     f"  - Head (3 rows):\n{head_str}"
                 )
             except Exception as error:  # pragma: no cover - defensive branch
                 return f"[Error reducing DataFrame: {error}]"
+        return str(obj)
+
+
+class SeriesReducer(StateReducer):
+    """Summarize a Series-like object for runtime snapshots."""
+
+    def reduce(self, obj: Any) -> Union[str, List[ContentBlock]]:
+        if _is_pandas_series(obj):
+            try:
+                length = len(obj)
+                dtype = str(obj.dtype)
+                name = getattr(obj, "name", None)
+                head_str = obj.head(5).to_string()
+                name_line = f"  - Name: {name}\n" if name is not None else ""
+                return (
+                    f"Series:\n"
+                    f"{name_line}"
+                    f"  - Length: {length}\n"
+                    f"  - Dtype: {dtype}\n"
+                    f"  - Head (5 rows):\n{head_str}"
+                )
+            except Exception as error:  # pragma: no cover - defensive branch
+                return f"[Error reducing Series: {error}]"
         return str(obj)
 
 
@@ -57,7 +111,7 @@ class PythonRuntimeInspector(EnvironmentInspector):
     """Runtime-first inspector that projects `RuntimeState` into snapshot blocks."""
 
     def __init__(self, reducers: Optional[List[StateReducer]] = None):
-        self.reducers = reducers or [DataFrameReducer(), ListReducer()]
+        self.reducers = reducers or [DataFrameReducer(), SeriesReducer(), ListReducer()]
 
     def _reduce_value(self, value: Any) -> List[ContentBlock]:
         reduced_value: Optional[Union[str, List[ContentBlock]]] = None

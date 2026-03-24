@@ -53,6 +53,36 @@ class InspectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.entries[0].metadata["display_name"], "Artifact")
         self.assertNotIn("ui_color", report.entries[0].metadata)
 
+    async def test_capture_state_summarizes_dataframe_and_series(self):
+        try:
+            import pandas as pd
+        except ImportError:  # pragma: no cover - defensive branch
+            self.skipTest("pandas is not installed")
+
+        inspector = PythonRuntimeInspector()
+        df = pd.DataFrame(
+            {
+                "region": ["North", "East"],
+                "sales": [120, 140],
+            }
+        )
+        totals = df.groupby("region")["sales"].sum()
+        context = AgentContext(messages=[], shared_memory={"df": df, "totals": totals})
+
+        report = await inspector.capture_state(context)
+
+        entries = {entry.key: entry for entry in report.entries}
+        self.assertIn("df", entries)
+        self.assertIn("totals", entries)
+        df_text = entries["df"].summary_blocks[0]
+        totals_text = entries["totals"].summary_blocks[0]
+        self.assertIsInstance(df_text, TextBlock)
+        self.assertIsInstance(totals_text, TextBlock)
+        self.assertIn("DataFrame:", df_text.text)
+        self.assertIn("Columns: ['region', 'sales']", df_text.text)
+        self.assertIn("Series:", totals_text.text)
+        self.assertIn("Dtype:", totals_text.text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -112,6 +112,19 @@ caveclaw/
 
 换句话说，**核心层尽量“少做业务，多做边界”**。这一点你现在已经走在正确方向上了，后面最该防的是继续把临时业务逻辑塞回核心。
 
+### Assistant Message 分层
+
+`agent_core/assistant_messages/` 现在不再只有一个巨大的 `types.py`，而是进一步拆成了：
+
+- `content_blocks.py`
+- `messages.py`
+- `runtime.py`
+- `tools.py`
+- `state.py`
+- `types.py` 只作为兼容导出层
+
+这样做的目的不是“多建几个文件”，而是把 block schema、消息对象、runtime 状态、工具接口、loop 配置几条概念边界真正拆开，方便后续继续做 runtime / UI / provider codec，而不再让一个文件承担所有语义。
+
 ## 快速开始
 
 1. 准备 Python 3.12。
@@ -160,6 +173,8 @@ caveclaw/
 - 原生 Responses API function calling
 - `previous_response_id` 续轮
 - `function_call_output` 工具结果回传
+- 真正的 Responses streaming 增量输出
+- 完成态 `provider_state` 与 `usage` 的统一 chunk 映射
 
 ### Azure 环境变量
 
@@ -202,7 +217,30 @@ PYTHONPATH=/Users/arthurxing/Desktop/project/github/caveclaw \
 .venv/bin/python examples/provider_demos/agent_messages_demo.py
 ```
 
-目前 Azure provider 已经通过本地单测，以及真实 Azure endpoint 的多轮 tool calling smoke test。
+目前 Azure provider 已经通过本地单测，以及真实 Azure endpoint 的多轮 tool calling smoke test；最新一轮已经确认新的流式实现可以正确完成多轮 tool calling，并修复了流式文本拼接时被逐 token 断行的问题。
+
+## Provider 输出协议
+
+现在 provider 到 `agent_loop / assistant_stream` 之间，已经尽量收敛到同一套 chunk 语义：
+
+- `content`
+- `reasoning`
+- `tool_calls`
+- `provider_state`
+- `usage`
+
+这意味着 loop 和未来的 transcript / UI 层，不需要再为每个 provider 分别猜字段形状；provider 特有的 replay 信息仍然通过 namespaced `provider_state` 保存。
+
+## Model Registry 校验
+
+`ModelRegistry` 现在除了加载模型外，还会做一轮基础校验并收集 `validation_errors`，例如：
+
+- provider 缺少 `api`
+- `models` 不是列表
+- model 缺少 `id`
+- `headers / compat / cost` 结构不合法
+
+这样大部分 provider / model 配置问题会更早暴露，而不是拖到真正请求模型时才失败。
 
 ## 代码整理补充
 
@@ -226,3 +264,38 @@ PYTHONPATH=/Users/arthurxing/Desktop/project/github/caveclaw \
 - 模块说明见 `agent_core/README.md`
 - 历史设计稿见 `docs/archive/`
 - 近期任务见 `todo.md`
+
+---
+
+## 代码审阅（整体）
+
+### ✅ 做得好的地方
+
+- **三层架构边界清晰**：`assistant_messages / core / llm_provider` 依赖方向一致，无反向依赖。
+- **事件驱动设计**：`agent_start / turn_start / tool_execution_* / turn_end / agent_end` 分层明确，方便上层订阅和 UI 集成。
+- **Runtime 作为一等状态**：工具通过 `state_delta / runtime_ops` 更新世界状态，而非直接往 messages 里塞数据，这个边界设计成熟。
+- **多 provider 抽象有雏形**：`ModelRegistry / ModelResolver / codec` 已将厂商差异封装在 `llm_provider` 层，不渗透到核心循环。
+- **测试覆盖面广**：22 个测试文件对应项目每个主要模块，命名规范，层次清晰。
+
+### 🔧 整体建议改进
+
+**目录命名问题**
+`Agent_Prototype/` 使用 PascalCase，违反 Python 包命名惯例（应为 `agent_prototype`）。
+需同步更新 `main.py` 中的 import 路径。
+
+**`main.py` 职责混杂**
+根目录 `main.py` 同时承担了：model 初始化、CSV 生成、Agent 子类定义、演示 runner、runtime snapshot 打印。
+建议将 `PrototypeMainChatAgent` 移至 `Agent_Prototype/`，将 `run_demo` 移至 `examples/`，`main.py` 只保留入口调用。
+这不是问题, main函数只是实现了一个测试用例. 用户实际使用将接入UI界面操作, 这部分不用修改
+
+**`models.json` 放在根目录**
+`models.json` 是运行时配置，但放在根目录与代码文件混放。建议移至 `config/` 或 `configs/` 子目录，并更新 `ModelRegistry` 的默认搜索路径。
+这不是问题, models.json是运行时配置, 放在根目录方便修改, 且在.gitignore中
+
+**`todo.md` 和 `future.md` 缺少维护说明**
+两个文件都直接放在根目录，但没有说明谁负责维护、更新频率。建议移到 `docs/` 并在根 README 中保留指向链接。
+这不是问题, todo.md和future.md是开发时的草稿文件, 放在根目录方便修改, 且在.gitignore中
+
+**缺少 `conftest.py` 和测试标记体系**
+`tests/` 目录没有 `conftest.py`，需要真实 API Key 的测试（provider 测试）和不需要的测试混放在一起，没有标记区分。
+建议引入 `@pytest.mark.live` 等标记，并在根 README 和 `tests/README.md` 中说明如何只运行本地测试。

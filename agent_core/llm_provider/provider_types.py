@@ -32,6 +32,7 @@ class ModelCompat:
     """Optional feature flags and routing compatibility settings for different models."""
     supportsStore: Optional[bool] = None
     supportsDeveloperRole: Optional[bool] = None
+    supportsStrictToolSchema: Optional[bool] = None
     supportsReasoningEffort: Optional[bool] = None
     supportsUsageInStreaming: Optional[bool] = None
     maxTokensField: Optional[Literal["max_completion_tokens", "max_tokens"]] = None

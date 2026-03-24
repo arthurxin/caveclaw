@@ -1,8 +1,25 @@
 import unittest
 
-from agent_core.assistant_messages import AssistantMessage, Message, ToolCall, ToolResultMessage, append_assistant_delta
+from agent_core.assistant_messages import (
+    AssistantDelta,
+    AssistantMessage,
+    ImageBlock,
+    Message,
+    TextBlock,
+    ThinkingBlock,
+    ToolCall,
+    ToolResultMessage,
+    append_assistant_delta,
+)
 from agent_core.llm_provider.api_registry import StreamOptions
-from agent_core.llm_provider.message_codec import AnthropicMessageCodec, ArkMessageCodec, AzureMessageCodec, GoogleMessageCodec, MiniMaxMessageCodec
+from agent_core.llm_provider.message_codec import (
+    AnthropicMessageCodec,
+    ArkMessageCodec,
+    AzureMessageCodec,
+    GoogleMessageCodec,
+    MiniMaxMessageCodec,
+    OpenAICompatibleMessageCodec,
+)
 from agent_core.llm_provider.providers.google_provider import (
     _convert_messages,
     _convert_schema_to_gemini,
@@ -15,7 +32,7 @@ class MessageCodecTests(unittest.TestCase):
         codec = MiniMaxMessageCodec()
         message = Message(role="assistant", content="clean", raw_content="<think>plan</think>\nclean")
 
-        payloads = codec.to_provider_messages([message], StreamOptions())
+        payloads = codec.encode_messages([message], StreamOptions())
 
         self.assertEqual(payloads[0]["content"], "<think>plan</think>\nclean")
 
@@ -116,6 +133,45 @@ class MessageCodecTests(unittest.TestCase):
 
         self.assertEqual(message.provider_state["gemini"]["thought_signatures"], ["sig-1", "sig-2"])
 
+    def test_assistant_delta_merges_usage_payload(self):
+        message = AssistantMessage(content_blocks=[])
+
+        append_assistant_delta(message, {"usage": {"input_tokens": 12}})
+        append_assistant_delta(message, {"usage": {"output_tokens": 5, "total_tokens": 17}})
+
+        self.assertEqual(message.usage["input"], 12)
+        self.assertEqual(message.usage["output"], 5)
+        self.assertEqual(message.usage["totalTokens"], 17)
+        self.assertEqual(message.usage["input_tokens"], 12)
+        self.assertEqual(message.usage["output_tokens"], 5)
+        self.assertEqual(message.usage["total_tokens"], 17)
+
+    def test_streamed_text_content_reassembles_without_extra_newlines(self):
+        message = AssistantMessage(content_blocks=[])
+
+        append_assistant_delta(message, {"content": "你"})
+        append_assistant_delta(message, {"content": "好"})
+
+        self.assertEqual(message.content, "你好")
+
+    def test_assistant_delta_object_is_compatible_with_append(self):
+        message = AssistantMessage(content_blocks=[])
+        delta = AssistantDelta.from_chunk(
+            {
+                "content": "hello",
+                "reasoning": "plan",
+                "tool_calls": [{"id": "call_1", "name": "lookup", "arguments": {"city": "Beijing"}}],
+            }
+        )
+
+        append_assistant_delta(message, delta)
+
+        self.assertTrue(delta.has_text)
+        self.assertTrue(delta.has_reasoning)
+        self.assertTrue(delta.has_tool_calls)
+        self.assertEqual(message.content_blocks[0].text, "hello")
+        self.assertEqual(message.tool_calls[0].name, "lookup")
+
     def test_google_codec_infers_function_call_and_tool_response_parts(self):
         codec = GoogleMessageCodec()
         assistant = AssistantMessage(content_blocks=[], tool_calls=[ToolCall(id="call_1", name="getWeather", arguments={"city": "北京"})])
@@ -125,6 +181,54 @@ class MessageCodecTests(unittest.TestCase):
 
         self.assertEqual(payloads[0]["provider_state"]["gemini"]["parts"][0]["functionCall"]["name"], "getWeather")
         self.assertEqual(payloads[1]["provider_state"]["gemini"]["parts"][0]["functionResponse"]["name"], "getWeather")
+
+    def test_openai_compatible_codec_preserves_image_blocks(self):
+        codec = OpenAICompatibleMessageCodec()
+        message = Message(
+            role="user",
+            content_blocks=[
+                TextBlock(text="Describe this chart."),
+                ImageBlock(image_url="https://example.com/chart.png", mime_type="image/png"),
+            ],
+        )
+
+        payloads = codec.to_provider_messages([message], StreamOptions())
+
+        self.assertIsInstance(payloads[0]["content"], list)
+        self.assertEqual(payloads[0]["content"][0]["type"], "text")
+        self.assertEqual(payloads[0]["content"][1]["type"], "image_url")
+        self.assertEqual(payloads[0]["content"][1]["image_url"]["url"], "https://example.com/chart.png")
+
+    def test_google_codec_encodes_data_url_image_as_inline_data(self):
+        codec = GoogleMessageCodec()
+        message = Message(
+            role="user",
+            content_blocks=[
+                TextBlock(text="What is in this image?"),
+                ImageBlock(image_url="data:image/png;base64,QUJDRA==", mime_type="image/png"),
+            ],
+        )
+
+        payloads = codec.to_provider_messages([message], StreamOptions())
+
+        parts = payloads[0]["provider_state"]["gemini"]["parts"]
+        self.assertEqual(parts[0]["text"], "What is in this image?")
+        self.assertEqual(parts[1]["inlineData"]["mimeType"], "image/png")
+        self.assertEqual(parts[1]["inlineData"]["data"], "QUJDRA==")
+
+    def test_openai_compatible_codec_stringifies_assistant_tool_call_arguments(self):
+        codec = OpenAICompatibleMessageCodec()
+        assistant = AssistantMessage(
+            content_blocks=[],
+            tool_calls=[ToolCall(id="call_1", name="run_python", arguments={"code": "print(1)"})],
+        )
+
+        payloads = codec.to_provider_messages([assistant], StreamOptions())
+
+        self.assertEqual(
+            payloads[0]["tool_calls"][0]["function"]["arguments"],
+            '{"code": "print(1)"}',
+        )
 
     def test_anthropic_codec_maps_tool_history(self):
         codec = AnthropicMessageCodec()
@@ -138,25 +242,104 @@ class MessageCodecTests(unittest.TestCase):
         self.assertEqual(payloads[1]["role"], "user")
         self.assertEqual(payloads[1]["content"][0]["type"], "tool_result")
 
+    def test_anthropic_codec_encodes_data_url_image_block(self):
+        codec = AnthropicMessageCodec()
+        message = Message(
+            role="user",
+            content_blocks=[
+                TextBlock(text="Describe this image."),
+                ImageBlock(image_url="data:image/jpeg;base64,SGVsbG8=", mime_type="image/jpeg"),
+            ],
+        )
+
+        payloads = codec.to_provider_messages([message], StreamOptions())
+
+        self.assertEqual(payloads[0]["role"], "user")
+        self.assertIsInstance(payloads[0]["content"], list)
+        self.assertEqual(payloads[0]["content"][0]["type"], "text")
+        self.assertEqual(payloads[0]["content"][1]["type"], "image")
+        self.assertEqual(payloads[0]["content"][1]["source"]["media_type"], "image/jpeg")
+        self.assertEqual(payloads[0]["content"][1]["source"]["data"], "SGVsbG8=")
+
     def test_minimax_codec_from_provider_chunk_stores_replay_payload(self):
         codec = MiniMaxMessageCodec()
         assistant = AssistantMessage(content_blocks=[])
 
-        normalized = codec.from_provider_chunk(
+        normalized = codec.decode_chunk(
             {"raw_content": "<think>plan</think>\nanswer", "content": "answer"},
             assistant,
         )
 
         self.assertEqual(normalized["provider_state"]["minimax"]["replay_payload"]["content"], "<think>plan</think>\nanswer")
 
+    def test_minimax_codec_synthesizes_thinking_replay_when_raw_content_missing(self):
+        codec = MiniMaxMessageCodec()
+        assistant = AssistantMessage(
+            content_blocks=[
+                ThinkingBlock(thinking="plan"),
+                TextBlock(text="answer"),
+            ]
+        )
+
+        payloads = codec.to_provider_messages([assistant], StreamOptions())
+
+        self.assertEqual(payloads[0]["content"], "<think>plan</think>\nanswer")
+
+    def test_anthropic_codec_falls_back_to_text_for_remote_image_url(self):
+        codec = AnthropicMessageCodec()
+        message = Message(
+            role="user",
+            content_blocks=[ImageBlock(image_url="https://example.com/chart.png", alt_text="sales chart")],
+        )
+
+        payloads = codec.to_provider_messages([message], StreamOptions())
+
+        self.assertEqual(payloads[0]["content"], "[Image: sales chart]")
+
+    def test_anthropic_codec_finalize_attaches_signature_and_replay_payload(self):
+        codec = AnthropicMessageCodec()
+        assistant = AssistantMessage(content_blocks=[ThinkingBlock(thinking="private plan"), TextBlock(text="answer")])
+        assistant.set_provider_state("anthropic", {"thought_signatures": ["sig-1", "sig-1"]})
+
+        codec.finalize_provider_state(assistant)
+        codec.finalize_assistant_message(assistant)
+
+        self.assertEqual(assistant.provider_state["anthropic"]["thought_signatures"], ["sig-1"])
+        self.assertEqual(assistant.content_blocks[0].signature, "sig-1")
+        replay_payload = assistant.provider_state["anthropic"]["replay_payload"]
+        self.assertEqual(replay_payload["role"], "assistant")
+        self.assertEqual(replay_payload["content"][0]["type"], "thinking")
+        self.assertEqual(replay_payload["content"][0]["signature"], "sig-1")
+        self.assertEqual(replay_payload["content"][1]["type"], "text")
+
     def test_google_codec_finalize_deduplicates_thought_signatures(self):
         codec = GoogleMessageCodec()
-        assistant = AssistantMessage(content_blocks=[])
+        assistant = AssistantMessage(content_blocks=[ThinkingBlock(thinking="plan")])
         assistant.set_provider_state("gemini", {"thought_signatures": ["sig-1", "sig-1", "sig-2"]})
 
+        codec.finalize_provider_state(assistant)
         codec.finalize_assistant_message(assistant)
 
         self.assertEqual(assistant.provider_state["gemini"]["thought_signatures"], ["sig-1", "sig-2"])
+        self.assertEqual(assistant.content_blocks[0].signature, "sig-2")
+
+    def test_google_codec_finalize_extracts_thought_parts(self):
+        codec = GoogleMessageCodec()
+        assistant = AssistantMessage(content_blocks=[])
+        assistant.set_provider_state(
+            "gemini",
+            {
+                "parts": [
+                    {"text": "internal plan", "thoughtSignature": "sig-1"},
+                    {"text": "final answer"},
+                ]
+            },
+        )
+
+        codec.finalize_provider_state(assistant)
+
+        self.assertEqual(assistant.provider_state["gemini"]["thought_parts"][0]["text"], "internal plan")
+        self.assertEqual(assistant.provider_state["gemini"]["thought_parts"][0]["thoughtSignature"], "sig-1")
 
     def test_ark_codec_stringifies_tool_call_arguments_for_replay(self):
         codec = ArkMessageCodec()

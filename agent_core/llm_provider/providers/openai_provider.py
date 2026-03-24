@@ -3,12 +3,21 @@ OpenAI Provider adapter.
 Normalizes the OpenAI Streaming API response chunks into the unified dict format
 expected by agent_loop.
 """
-import os
-import json
+import asyncio
 from typing import AsyncGenerator, Dict, Any, List, Optional
 
 from ..provider_types import Model
-from ..api_registry import StreamOptions
+from ..api_registry import StreamOptions, merge_request_headers, maybe_override_payload, resolve_effective_max_tokens
+from ..compat import (
+    build_openai_compatible_tools,
+    build_reasoning_payload,
+    normalize_openai_compatible_messages,
+    resolve_max_tokens_field,
+    supports_usage_in_streaming,
+)
+from ..message_codec import OpenAICompatibleMessageCodec
+from ..normalized_chunks import content_chunk, normalize_usage_payload, parse_json_arguments, tool_calls_chunk, usage_chunk
+from ..retry import ensure_retry_delay_within_cap, extract_retry_delay_ms
 
 
 class OpenAiProvider:
@@ -26,6 +35,7 @@ class OpenAiProvider:
       3. default: None (uses official OpenAI endpoint)
     """
     api = "openai-chat"
+    message_codec = OpenAICompatibleMessageCodec()
 
     async def stream(
         self,
@@ -35,52 +45,74 @@ class OpenAiProvider:
         api_key: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         try:
-            from openai import AsyncOpenAI
+            from openai import APIStatusError, AsyncOpenAI, RateLimitError
         except ImportError:
             raise ImportError("openai package is required: uv add openai")
 
-        key = api_key or os.environ.get("OPENAI_API_KEY")
-        base_url = model.baseUrl or os.environ.get("OPENAI_BASE_URL") or None
+        key = api_key
+        base_url = model.baseUrl or None
+        default_headers = merge_request_headers(model, options) or None
 
-        client = AsyncOpenAI(api_key=key, base_url=base_url)
+        client = AsyncOpenAI(api_key=key, base_url=base_url, default_headers=default_headers)
 
-        # Build tools payload if provided
-        openai_tools = None
-        if options.tools:
-            openai_tools = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    },
-                }
-                for t in options.tools
-            ]
+        provider_messages = normalize_openai_compatible_messages(model, messages)
 
-        kwargs: Dict[str, Any] = dict(
-            model=model.id,
-            messages=messages,
-        )
+        openai_tools = build_openai_compatible_tools(model, options.tools)
+
+        kwargs: Dict[str, Any] = dict(model=model.id, messages=provider_messages)
+        kwargs[resolve_max_tokens_field(model)] = resolve_effective_max_tokens(model, options)
+        if supports_usage_in_streaming(model):
+            kwargs["stream_options"] = {"include_usage": True}
         if openai_tools:
             kwargs["tools"] = openai_tools
-        if options.thinking_level in ("high", "xhigh") and model.reasoning:
-            kwargs["reasoning_effort"] = "high"
+        if options.temperature is not None:
+            kwargs["temperature"] = options.temperature
+        if options.metadata:
+            kwargs["metadata"] = dict(options.metadata)
+        if options.session_id:
+            metadata = dict(kwargs.get("metadata") or {})
+            metadata.setdefault("session_id", options.session_id)
+            kwargs["metadata"] = metadata
+        kwargs.update(build_reasoning_payload(model, options.thinking_level))
+        kwargs = dict(await maybe_override_payload(kwargs, model, options))
 
         # Accumulator for streaming tool call fragments
         tool_call_accum: Dict[int, Dict[str, Any]] = {}
 
-        # Use standard create(stream=True) to get raw SSE chunks
-        stream_resp = await client.chat.completions.create(**kwargs, stream=True)
+        while True:
+            try:
+                stream_resp = await client.chat.completions.create(**kwargs, stream=True)
+                break
+            except (RateLimitError, APIStatusError) as error:
+                status_code = getattr(error, "status_code", None)
+                if status_code not in {429, 503}:
+                    raise
+                response = getattr(error, "response", None)
+                headers = getattr(response, "headers", None)
+                body = getattr(error, "body", None)
+                delay_ms = extract_retry_delay_ms(str(body or error), headers)
+                if delay_ms is None:
+                    raise
+                ensure_retry_delay_within_cap(delay_ms, options.max_retry_delay_ms)
+                await asyncio.sleep(delay_ms / 1000)
+
         async for chunk in stream_resp:
+            if getattr(chunk, "usage", None):
+                usage = normalize_usage_payload(
+                    input_tokens=getattr(chunk.usage, "prompt_tokens", None),
+                    output_tokens=getattr(chunk.usage, "completion_tokens", None),
+                    total_tokens=getattr(chunk.usage, "total_tokens", None),
+                )
+                if usage:
+                    yield usage_chunk(usage)
+
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta is None:
                 continue
 
             # Text content fragment
             if delta.content:
-                yield {"content": delta.content}
+                yield content_chunk(delta.content)
 
             # Tool call delta fragments
             if delta.tool_calls:
@@ -105,13 +137,10 @@ class OpenAiProvider:
             assembled = []
             for idx in sorted(tool_call_accum.keys()):
                 tc = tool_call_accum[idx]
-                try:
-                    args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-                except json.JSONDecodeError:
-                    args = {"raw": tc["arguments"]}
+                args = parse_json_arguments(tc["arguments"])
                 assembled.append({
                     "id": tc["id"],
                     "name": tc["name"],
                     "arguments": args,
                 })
-            yield {"tool_calls": assembled}
+            yield tool_calls_chunk(assembled)

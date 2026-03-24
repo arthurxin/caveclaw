@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import os
 import uuid
 from typing import Any, AsyncGenerator, Callable, List, Optional
-
-from dotenv import load_dotenv
 
 from ..assistant_messages.assistant_stream import stream_assistant_response
 from ..assistant_messages.types import (
@@ -22,6 +19,12 @@ from ..assistant_messages.types import (
     content_blocks_from_text,
 )
 from .compaction import compact_messages_for_llm
+from .python_program_execution import (
+    execute_python_program_lane,
+    is_python_program_execution_enabled,
+    resolve_python_program_execution_controller,
+    sanitize_assistant_message_for_python_execution,
+)
 from .runtime_projection import (
     build_worklog_message,
     commit_runtime_ops,
@@ -30,8 +33,8 @@ from .runtime_projection import (
 )
 from .tool_execution import collect_tool_result_runtime_ops, execute_tool_with_streaming_updates
 
-# Load environment variables
-load_dotenv()
+DEFAULT_MAX_ROUNDS = 20
+DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES = 5
 
 
 async def run_loop(
@@ -40,21 +43,22 @@ async def run_loop(
     config: AgentLoopConfig,
     stream_fn: Optional[Callable[..., AsyncGenerator[Any, None]]] = None,
     runtime: Optional[RuntimeState] = None,
+    python_runtime: Optional[Any] = None,
 ) -> AsyncGenerator[AgentEvent, None]:
     """
     The core state machine loop with streaming assistant lifecycle events,
     runtime injection, and tool runtime commits.
     """
 
-    env_max_rounds = int(os.environ.get("MAX_ROUNDS", "20"))
-    env_max_consec_failures = int(os.environ.get("MAX_CONSECUTIVE_FAILURES", "5"))
+    max_rounds = getattr(config, "max_rounds", None) or DEFAULT_MAX_ROUNDS
+    max_consecutive_failures = getattr(config, "max_consecutive_tool_failures", None) or DEFAULT_MAX_CONSECUTIVE_TOOL_FAILURES
 
-    max_rounds = getattr(config, "max_rounds", env_max_rounds) or env_max_rounds
-    max_consecutive_failures = (
-        getattr(config, "max_consecutive_tool_failures", env_max_consec_failures) or env_max_consec_failures
+    agent_context = AgentContext(
+        messages=context_messages,
+        runtime=runtime or RuntimeState(),
+        shared_memory={},
+        python_runtime=python_runtime,
     )
-
-    agent_context = AgentContext(messages=context_messages, runtime=runtime or RuntimeState(), shared_memory={})
     abort_signal: CancellationSignal = getattr(config, "abort_signal", None) or BasicCancellationSignal()
     loop_event_id = str(uuid.uuid4())
     yield AgentEvent(type="agent_start", event_id=loop_event_id)
@@ -146,7 +150,51 @@ async def run_loop(
             yield AgentEvent(type="agent_end", parent_id=loop_event_id, data={"messages": context_messages})
             return
 
+        if is_python_program_execution_enabled(config):
+            python_program_controller = resolve_python_program_execution_controller(config)
+            python_block = python_program_controller.select_python_block(assistant_msg)
+            if python_block:
+                sanitized_assistant_message = sanitize_assistant_message_for_python_execution(
+                    assistant_msg,
+                    python_block,
+                )
+                context_messages[-1] = sanitized_assistant_message
+                agent_context.messages = context_messages
+                execution = await execute_python_program_lane(
+                    assistant_message=sanitized_assistant_message,
+                    python_block=python_block,
+                    agent_context=agent_context,
+                    config=config,
+                    turn_event_id=turn_event_id,
+                )
+                for event in execution.events:
+                    yield event
+
+                if execution.result_message is not None:
+                    context_messages.append(execution.result_message)
+                agent_context.messages = context_messages
+
+                consecutive_failures = 0 if execution.result.success else consecutive_failures + 1
+                yield AgentEvent(
+                    type="turn_end",
+                    parent_id=turn_event_id,
+                    data={
+                        "message": assistant_msg,
+                        "executed_assistant_message": sanitized_assistant_message,
+                        "tool_results": [],
+                        "python_program_executed": True,
+                        "python_program_success": execution.result.success,
+                        "python_program_result": execution.result,
+                    },
+                )
+
+                if abort_signal.is_cancelled:
+                    yield AgentEvent(type="agent_end", parent_id=loop_event_id, data={"messages": context_messages})
+                    return
+                continue
+
         if not assistant_msg.tool_calls:
+
             yield AgentEvent(
                 type="turn_end",
                 parent_id=turn_event_id,
@@ -176,6 +224,9 @@ async def run_loop(
                 parent_id=turn_event_id,
                 data={
                     "tool_call": tool_call,
+                    "tool_call_id": tool_call.id,
+                    "tool_name": tool_call.name,
+                    "args": dict(tool_call.arguments),
                     "reads": getattr(tool, "reads", []),
                     "writes": getattr(tool, "writes", []),
                     "temp_outputs": getattr(tool, "temp_outputs", []),
@@ -197,7 +248,19 @@ async def run_loop(
                 consecutive_failures += 1
                 yield AgentEvent(type="message_start", parent_id=tool_event_id, data={"message": tool_result_message})
                 yield AgentEvent(type="message_end", parent_id=tool_event_id, data={"message": tool_result_message})
-                yield AgentEvent(type="tool_execution_error", parent_id=tool_event_id, data={"error": error_msg})
+                yield AgentEvent(
+                    type="tool_execution_error",
+                    parent_id=tool_event_id,
+                    data={
+                        "tool_call": tool_call,
+                        "tool_call_id": tool_call.id,
+                        "tool_name": tool_call.name,
+                        "args": dict(tool_call.arguments),
+                        "error": error_msg,
+                        "is_error": True,
+                        "tool_result_message": tool_result_message,
+                    },
+                )
             else:
                 try:
                     execution = await execute_tool_with_streaming_updates(
@@ -236,7 +299,13 @@ async def run_loop(
                         type="tool_execution_success",
                         parent_id=tool_event_id,
                         data={
+                            "tool_call": tool_call,
+                            "tool_call_id": tool_call.id,
+                            "tool_name": tool_call.name,
+                            "args": dict(tool_call.arguments),
                             "result": tool_result_message.content,
+                            "is_error": False,
+                            "tool_result_message": tool_result_message,
                             "delta_staged": bool(execution.staged_runtime_ops or result.state_delta or result.runtime_ops),
                             "runtime_revision": agent_context.runtime.revision,
                         },
@@ -257,7 +326,19 @@ async def run_loop(
                     consecutive_failures += 1
                     yield AgentEvent(type="message_start", parent_id=tool_event_id, data={"message": tool_result_message})
                     yield AgentEvent(type="message_end", parent_id=tool_event_id, data={"message": tool_result_message})
-                    yield AgentEvent(type="tool_execution_error", parent_id=tool_event_id, data={"error": error_msg})
+                    yield AgentEvent(
+                        type="tool_execution_error",
+                        parent_id=tool_event_id,
+                        data={
+                            "tool_call": tool_call,
+                            "tool_call_id": tool_call.id,
+                            "tool_name": tool_call.name,
+                            "args": dict(tool_call.arguments),
+                            "error": error_msg,
+                            "is_error": True,
+                            "tool_result_message": tool_result_message,
+                        },
+                    )
                     if abort_signal.is_cancelled:
                         break
 

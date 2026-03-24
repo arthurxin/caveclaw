@@ -5,15 +5,17 @@ parts such as `thoughtSignature` during tool-calling replay.
 """
 from __future__ import annotations
 
+import asyncio
 import json
-import os
 from typing import Any, AsyncGenerator, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
-from ..api_registry import StreamOptions
+from ..api_registry import StreamOptions, merge_request_headers, maybe_override_payload, resolve_effective_max_tokens
 from ..message_codec import GoogleMessageCodec
+from ..normalized_chunks import content_chunk, normalize_usage_payload, provider_state_chunk, reasoning_chunk, tool_calls_chunk, usage_chunk
 from ..provider_types import Model
+from ..retry import ensure_retry_delay_within_cap, extract_retry_delay_ms
 
 GOOGLE_DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -29,65 +31,83 @@ class GoogleProvider:
         options: StreamOptions,
         api_key: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        key = api_key
         if not key:
-            raise ValueError("No Google API key found. Set GEMINI_API_KEY in your .env")
+            raise ValueError("No Google API key provided. Resolve it in the host and pass it via config.get_api_key()/config.api_key.")
 
-        base_url = (model.baseUrl or os.environ.get("GOOGLE_BASE_URL") or GOOGLE_DEFAULT_BASE_URL).rstrip("/")
+        base_url = (model.baseUrl or GOOGLE_DEFAULT_BASE_URL).rstrip("/")
         url = f"{base_url}/models/{model.id}:streamGenerateContent"
 
         payload = _build_generate_content_payload(messages, model, options)
+        payload = dict(await maybe_override_payload(payload, model, options))
         emitted_tool_calls: set[str] = set()
         tool_call_counter = 0
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=20.0)) as client:
-            async with client.stream(
-                "POST",
-                url,
-                params={"alt": "sse", "key": key},
-                headers={"Content-Type": "application/json"},
-                json=payload,
-            ) as response:
-                if response.status_code >= 400:
-                    raise ValueError(_format_google_error(response))
+            while True:
+                async with client.stream(
+                    "POST",
+                    url,
+                    params={"alt": "sse", "key": key},
+                    headers={"Content-Type": "application/json", **merge_request_headers(model, options)},
+                    json=payload,
+                ) as response:
+                    if response.status_code >= 400:
+                        error_body = await response.aread()
+                        body_text = error_body.decode("utf-8", errors="replace")
+                        retry_delay_ms = None
+                        if response.status_code in {429, 503}:
+                            retry_delay_ms = extract_retry_delay_ms(body_text, response.headers)
+                        if retry_delay_ms is not None:
+                            ensure_retry_delay_within_cap(retry_delay_ms, options.max_retry_delay_ms)
+                            await asyncio.sleep(retry_delay_ms / 1000)
+                            continue
+                        raise ValueError(_format_google_error(response, error_body))
 
-                async for event_payload in _iter_sse_json(response):
-                    for candidate in event_payload.get("candidates", []):
-                        content = candidate.get("content") or {}
-                        for part in content.get("parts", []):
-                            provider_state = _extract_gemini_provider_state(part)
+                    async for event_payload in _iter_sse_json(response):
+                        usage = _extract_google_usage(event_payload)
+                        if usage:
+                            yield usage_chunk(usage)
+                        for candidate in event_payload.get("candidates", []):
+                            content = candidate.get("content") or {}
+                            for part in content.get("parts", []):
+                                provider_state = _extract_gemini_provider_state(part)
+                                is_thought_part = bool(provider_state and provider_state.get("thought_signatures"))
 
-                            text = part.get("text")
-                            if text:
-                                payload_chunk: Dict[str, Any] = {"content": text}
-                                if provider_state:
-                                    payload_chunk["provider_state"] = {"gemini": provider_state}
-                                yield payload_chunk
-                                continue
-
-                            function_call = part.get("functionCall")
-                            if function_call:
-                                tool_call_key = json.dumps(function_call, ensure_ascii=False, sort_keys=True)
-                                if tool_call_key in emitted_tool_calls:
+                                text = part.get("text")
+                                if text:
+                                    payload_chunk: Dict[str, Any] = (
+                                        reasoning_chunk(text) if is_thought_part else content_chunk(text)
+                                    )
+                                    if provider_state:
+                                        payload_chunk.update(provider_state_chunk("gemini", provider_state))
+                                    yield payload_chunk
                                     continue
-                                emitted_tool_calls.add(tool_call_key)
-                                tool_call_counter += 1
-                                payload_chunk = {
-                                    "tool_calls": [
-                                        {
-                                            "id": f"gemini_call_{tool_call_counter}",
-                                            "name": function_call.get("name", ""),
-                                            "arguments": dict(function_call.get("args") or {}),
-                                        }
-                                    ]
-                                }
-                                if provider_state:
-                                    payload_chunk["provider_state"] = {"gemini": provider_state}
-                                yield payload_chunk
-                                continue
 
-                            if provider_state:
-                                yield {"provider_state": {"gemini": provider_state}}
+                                function_call = part.get("functionCall")
+                                if function_call:
+                                    tool_call_key = json.dumps(function_call, ensure_ascii=False, sort_keys=True)
+                                    if tool_call_key in emitted_tool_calls:
+                                        continue
+                                    emitted_tool_calls.add(tool_call_key)
+                                    tool_call_counter += 1
+                                    payload_chunk = tool_calls_chunk(
+                                        [
+                                            {
+                                                "id": f"gemini_call_{tool_call_counter}",
+                                                "name": function_call.get("name", ""),
+                                                "arguments": dict(function_call.get("args") or {}),
+                                            }
+                                        ]
+                                    )
+                                    if provider_state:
+                                        payload_chunk.update(provider_state_chunk("gemini", provider_state))
+                                    yield payload_chunk
+                                    continue
+
+                                if provider_state:
+                                    yield provider_state_chunk("gemini", provider_state)
+                    break
 
 
 def _build_generate_content_payload(
@@ -106,9 +126,11 @@ def _build_generate_content_payload(
     payload: Dict[str, Any] = {
         "contents": contents,
         "generationConfig": {
-            "maxOutputTokens": model.maxTokens,
+            "maxOutputTokens": resolve_effective_max_tokens(model, options),
         },
     }
+    if options.temperature is not None:
+        payload["generationConfig"]["temperature"] = options.temperature
     if system_instruction:
         payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
     if options.tools:
@@ -260,6 +282,18 @@ def _extract_gemini_provider_state(part: Dict[str, Any]) -> Optional[Dict[str, A
     }
 
 
+def _extract_google_usage(event_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    usage_metadata = event_payload.get("usageMetadata")
+    if not isinstance(usage_metadata, dict):
+        return None
+    return normalize_usage_payload(
+        input_tokens=usage_metadata.get("promptTokenCount"),
+        output_tokens=usage_metadata.get("candidatesTokenCount"),
+        total_tokens=usage_metadata.get("totalTokenCount"),
+        extra={"thoughts_token_count": usage_metadata.get("thoughtsTokenCount")} if "thoughtsTokenCount" in usage_metadata else None,
+    )
+
+
 async def _iter_sse_json(response: httpx.Response) -> AsyncGenerator[Dict[str, Any], None]:
     event_lines: List[str] = []
 
@@ -281,9 +315,10 @@ async def _iter_sse_json(response: httpx.Response) -> AsyncGenerator[Dict[str, A
             yield json.loads(payload)
 
 
-def _format_google_error(response: httpx.Response) -> str:
+def _format_google_error(response: httpx.Response, body: bytes | None = None) -> str:
+    raw_body = body if body is not None else response.content
     try:
-        payload = response.json()
+        payload = json.loads(raw_body.decode("utf-8"))
     except Exception:
-        payload = response.text
+        payload = raw_body.decode("utf-8", errors="replace")
     return f"Google Gemini request failed ({response.status_code}): {payload}"

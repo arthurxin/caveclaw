@@ -6,15 +6,24 @@ multi-turn tool-calling continuations via `previous_response_id`.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Any, AsyncGenerator, Dict, List, Optional, Sequence, Tuple
 
-import httpx
-
-from ..api_registry import StreamOptions
+from ..api_registry import StreamOptions, merge_request_headers, maybe_override_payload, resolve_effective_max_tokens
 from ..message_codec import AzureMessageCodec
+from ..normalized_chunks import (
+    content_chunk,
+    normalize_usage_payload,
+    parse_json_arguments,
+    provider_state_chunk,
+    reasoning_chunk,
+    tool_calls_chunk,
+    usage_chunk,
+)
 from ..provider_types import Model
+from ..retry import ensure_retry_delay_within_cap, extract_retry_delay_ms
 
 
 class AzureProvider:
@@ -28,47 +37,96 @@ class AzureProvider:
         options: StreamOptions,
         api_key: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        key = api_key or os.environ.get("AZURE_API_KEY")
+        try:
+            from openai import APIStatusError, AsyncOpenAI, RateLimitError
+        except ImportError:
+            raise ImportError("openai package is required: uv add openai")
+
+        key = api_key
         if not key:
-            raise ValueError("No Azure API key found. Set AZURE_API_KEY in your .env")
+            raise ValueError("No Azure API key provided. Resolve it in the host and pass it via config.get_api_key()/config.api_key.")
 
         endpoint = (model.baseUrl or os.environ.get("AZURE_BASE_URL") or "").strip()
         if not endpoint:
             raise ValueError("No Azure Responses endpoint configured. Set model.baseUrl or AZURE_BASE_URL.")
 
         payload = _build_azure_payload(messages, model, options)
+        payload = dict(await maybe_override_payload(payload, model, options))
+        client = AsyncOpenAI(
+            api_key=key if _azure_auth_mode() != "api-key" else "unused",
+            base_url=_extract_azure_base_url(endpoint),
+            default_headers=_build_azure_headers(key, options, model),
+        )
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=20.0)) as client:
-            response = await client.post(
-                endpoint,
-                headers=_build_azure_headers(key),
-                json=payload,
-            )
+        while True:
+            try:
+                stream_resp = await client.responses.create(**payload, stream=True)
+                break
+            except (RateLimitError, APIStatusError) as error:
+                status_code = getattr(error, "status_code", None)
+                if status_code not in {429, 503}:
+                    raise
+                response = getattr(error, "response", None)
+                headers = getattr(response, "headers", None)
+                body = getattr(error, "body", None)
+                delay_ms = extract_retry_delay_ms(str(body or error), headers)
+                if delay_ms is None:
+                    raise
+                ensure_retry_delay_within_cap(delay_ms, options.max_retry_delay_ms)
+                await asyncio.sleep(delay_ms / 1000)
+        async for event in stream_resp:
+            event_type = getattr(event, "type", "")
 
-        if response.status_code >= 400:
-            raise ValueError(_format_azure_error(response))
+            if event_type == "response.output_text.delta" and getattr(event, "delta", None):
+                yield content_chunk(event.delta)
+                continue
 
-        body = response.json()
-        provider_state, reasoning, content, tool_calls = _parse_azure_response(body)
+            if event_type in {"response.reasoning_summary_text.delta", "response.reasoning_text.delta"} and getattr(event, "delta", None):
+                yield reasoning_chunk(event.delta)
+                continue
 
-        if provider_state:
-            yield {"provider_state": {"azure": provider_state}}
-        if reasoning:
-            yield {"reasoning": reasoning}
-        if content:
-            yield {"content": content}
-        if tool_calls:
-            yield {"tool_calls": tool_calls}
+            if event_type == "response.output_item.done":
+                item = getattr(event, "item", None)
+                if getattr(item, "type", None) == "function_call":
+                    yield tool_calls_chunk(
+                        [{
+                            "id": getattr(item, "call_id", None) or getattr(item, "id", None) or "azure_call",
+                            "name": getattr(item, "name", "") or "",
+                            "arguments": parse_json_arguments(getattr(item, "arguments", None)),
+                        }]
+                    )
+                continue
+
+            if event_type == "response.completed":
+                response = getattr(event, "response", None)
+                provider_state = _extract_completed_provider_state(response)
+                if provider_state:
+                    yield provider_state_chunk("azure", provider_state)
+                usage = _extract_completed_usage(response)
+                if usage:
+                    yield usage_chunk(usage)
 
 
-def _build_azure_headers(api_key: str) -> Dict[str, str]:
-    auth_mode = os.environ.get("AZURE_AUTH_MODE", "bearer").lower()
+def _build_azure_headers(api_key: str, options: StreamOptions, model: Model) -> Dict[str, str]:
+    auth_mode = _azure_auth_mode()
     headers = {"Content-Type": "application/json"}
     if auth_mode == "api-key":
         headers["api-key"] = api_key
     else:
         headers["Authorization"] = f"Bearer {api_key}"
+    headers.update(merge_request_headers(model, options))
     return headers
+
+
+def _azure_auth_mode() -> str:
+    return os.environ.get("AZURE_AUTH_MODE", "bearer").lower()
+
+
+def _extract_azure_base_url(endpoint: str) -> str:
+    trimmed = endpoint.rstrip("/")
+    if trimmed.endswith("/responses"):
+        return trimmed[: -len("/responses")]
+    return trimmed
 
 
 def _build_azure_payload(
@@ -87,7 +145,7 @@ def _build_azure_payload(
     payload: Dict[str, Any] = {
         "model": model.id,
         "input": input_items,
-        "max_output_tokens": model.maxTokens,
+        "max_output_tokens": resolve_effective_max_tokens(model, options),
     }
     if instructions:
         payload["instructions"] = instructions
@@ -97,6 +155,14 @@ def _build_azure_payload(
     reasoning_effort = _thinking_level_to_effort(options.thinking_level)
     if model.reasoning or reasoning_effort is not None:
         payload["reasoning"] = {"effort": reasoning_effort or "medium"}
+    if options.temperature is not None:
+        payload["temperature"] = options.temperature
+    if options.metadata:
+        payload["metadata"] = dict(options.metadata)
+    if options.session_id:
+        metadata = dict(payload.get("metadata") or {})
+        metadata.setdefault("session_id", options.session_id)
+        payload["metadata"] = metadata
 
     if options.tools:
         payload["tools"] = [
@@ -247,16 +313,7 @@ def _extract_reasoning_parts(output_item: Dict[str, Any]) -> List[str]:
 
 
 def _parse_tool_arguments(arguments: Any) -> Dict[str, Any]:
-    if isinstance(arguments, dict):
-        return dict(arguments)
-    if not arguments:
-        return {}
-    if isinstance(arguments, str):
-        try:
-            return json.loads(arguments)
-        except json.JSONDecodeError:
-            return {"raw": arguments}
-    return {"raw": arguments}
+    return parse_json_arguments(arguments)
 
 
 def _maybe_unescape_text(value: Any) -> str:
@@ -271,9 +328,25 @@ def _maybe_unescape_text(value: Any) -> str:
         return value
 
 
-def _format_azure_error(response: httpx.Response) -> str:
-    try:
-        payload = response.json()
-    except Exception:
-        payload = response.text
-    return f"Azure Responses request failed ({response.status_code}): {payload}"
+def _extract_completed_provider_state(response: Any) -> Optional[Dict[str, Any]]:
+    if response is None:
+        return None
+    payload: Dict[str, Any] = {}
+    response_id = getattr(response, "id", None)
+    status = getattr(response, "status", None)
+    if response_id:
+        payload["response_id"] = response_id
+    if status:
+        payload["status"] = status
+    return payload or None
+
+
+def _extract_completed_usage(response: Any) -> Optional[Dict[str, Any]]:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    return normalize_usage_payload(
+        input_tokens=getattr(usage, "input_tokens", None),
+        output_tokens=getattr(usage, "output_tokens", None),
+        total_tokens=getattr(usage, "total_tokens", None),
+    )

@@ -18,6 +18,11 @@
 - [x] 将 resolver 默认模型更新为当前配置一致的 `openai/gpt-5.4`。
 - [x] 将 `agent_core` 重组为 `core / assistant_messages / llm_provider` 三层目录，并为每层补上 README。
 - [x] 支持通过 `.env` 中的 `CAVECLAW_DEFAULT_PROVIDER / CAVECLAW_DEFAULT_MODEL` 选择默认 provider。
+- [x] 将 `assistant_messages/types.py` 继续拆分为 `content_blocks / messages / runtime / tools / state` 子模块，并保留兼容导出。
+- [x] 将 Azure provider 从“整包 Responses 解析”升级为真正的流式增量输出。
+- [x] 为 provider 输出补齐更统一的 chunk 协议：
+  `content / reasoning / tool_calls / provider_state / usage`。
+- [x] 为 `ModelRegistry` 补上更明确的配置校验与 validation error 收集。
 
 ## 当前优先级
 
@@ -38,6 +43,7 @@
   把 `set / delete / merge / append / touch / replace_blocks` 收口到统一提交路径。
 - [ ] 细化 `RuntimeVariable.kind` 的处理策略：
   `opaque / structured / tabular / message_blocks / binary_ref` 的 inspector 行为要不同。
+  这一项暂时搁置，等 provider codec、runtime、compaction 主路径更稳定后再回来看。
 
 ### P1: 把 compaction 变成每次发给 provider 前的可扩展步骤
 
@@ -50,7 +56,7 @@
 
 ### P1.5: 把 provider 适配层做稳
 
-- [ ] 统一 provider 的工具调用、reasoning 事件和 usage 输出格式。
+- [x] 统一 provider 的工具调用、reasoning 事件和 usage 输出格式。
 - [ ] 把 `minimax_local` 的特殊 replay 语义完全封装在 provider 内：
   runtime 在 `AgentMessage` 之上，provider 在 `AgentMessage` 之下，统一层仍然是 `AgentMessage`。
 - [x] 引入 provider codec 基础层：
@@ -58,10 +64,14 @@
 - [x] 为 Gemini provider 补齐 `thoughtSignature` replay 和连续 tool result 合并逻辑。
 - [x] 为 Volcengine provider 修复 tool call replay 的 arguments 字符串化问题。
 - [x] 为 Azure provider 建立 codec / replay / continuation 基础路径。
-- [ ] 给 `ModelRegistry` 增加更清楚的加载错误与配置校验。
-- [ ] 给 Azure Responses provider 补 usage、streaming 增量和 provider_state 精细化映射。
-- [ ] 继续把 `assistant_messages/types.py` 拆成更细的子模块：
+- [x] 给 `ModelRegistry` 增加更清楚的加载错误与配置校验。
+- [x] 给 Azure Responses provider 补 usage、streaming 增量和 provider_state 精细化映射。
+- [x] 继续把 `assistant_messages/types.py` 拆成更细的子模块：
   例如 content blocks、runtime types、tool/result types、event/config types。
+- [x] 将 provider codec 重构为更对称的输入/输出接口：
+  现在主路径已经按 `encode_messages / decode_chunk / finalize_provider_state / finalize_assistant_message` 分层。
+- [ ] 继续收紧 provider 协议细节：
+  例如 stop reason、provider-native usage 细项、reasoning block 元数据的统一映射。
 
 ### P2: 暂时只记 TODO，不急着实现
 
@@ -71,6 +81,8 @@
   subagent 默认拥有独立 runtime，之后再决定如何继承父级快照或回写父级结果。
 - [ ] 工具/技能变量编排：
   当前只补了 `reads / writes / temp_outputs` 和 runtime selection 伪接口；真正的 tool calling / variable orchestration 之后按自定义方案继续写，不走传统兼容式实现。
+- [ ] provider/platform 平台化能力：
+  暂不实现 OAuth、browser/CSP 兼容、更多 provider 变体，以及更厚的 auth/catalog 体系；这一组能力属于后续平台化阶段，不进入当前主线。
 
 ## 暂不优先
 
